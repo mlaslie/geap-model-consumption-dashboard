@@ -207,7 +207,9 @@ def calculate_estimated_cost(
     Resolution order:
       1. Exact match on the normalized name.
       2. Longest-prefix match (e.g. 'gemini-2.5-flash-001' -> 'gemini-2.5-flash').
-      3. Default flash-class rates with a warning naming the unknown model.
+      3. UNPRICED ($0, pricing_match='default') with a warning naming the
+         unknown model — no invented rate; costs recompute once the model is
+         added via Pricing & Planner.
 
     tier: 'le200k' (default, <=200 K context) or 'gt200k' (>200 K context).
           When 'gt200k' and the matched pricing entry contains
