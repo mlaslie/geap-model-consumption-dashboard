@@ -141,6 +141,23 @@ python -m pytest tests/ -q
 
 That is the entire command. The script handles pulling, dependency updates, the frontend build, and the BigQuery view migration automatically. All user state is preserved.
 
+### Installed from a ZIP download?
+
+A ZIP install has no `.git` directory, so `update.sh` cannot pull. Convert it into a git checkout **in place** — your state files are untracked, so they are not touched:
+
+```bash
+cd <your-app-directory>
+git init -b main
+git remote add origin https://github.com/mlaslie/geap-model-consumption-dashboard.git
+git fetch origin
+git reset --hard origin/main        # overwrites CODE with upstream; state files (.env,
+                                    # budgets.json, pricing.json, etc.) are untracked and survive
+git branch --set-upstream-to=origin/main main
+./update.sh
+```
+
+> Any local **code** edits in the ZIP copy are replaced by upstream. If you prefer, the alternative is a fresh `git clone` next to the old directory, copying over `.env` (plus `budgets.json`, `logging_config.json`, `estimates.json`, `model_sync.json`, and `backend/pricing.json` if you run without GCS). After either path, all future updates are just `./update.sh`.
+
 ### What survives an update
 
 | State | Where it lives | Survives `git pull`? |
