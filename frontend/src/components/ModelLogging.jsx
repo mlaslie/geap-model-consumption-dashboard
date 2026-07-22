@@ -305,6 +305,69 @@ export default function ModelLogging() {
         </div>
       )}
 
+      {/* Auto-sync settings block */}
+      <div style={{
+        border: '1px solid var(--line)',
+        borderRadius: 'var(--radius)',
+        padding: '18px 20px',
+        backgroundColor: 'var(--surface-2)',
+      }}>
+        <div style={{
+          fontSize: '11px',
+          fontWeight: '700',
+          textTransform: 'uppercase',
+          letterSpacing: '0.09em',
+          color: 'var(--ink-3)',
+          marginBottom: '14px',
+        }}>
+          Startup Settings
+        </div>
+        <label style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '12px',
+          cursor: isAutoSyncSaving ? 'wait' : 'pointer',
+        }}>
+          <input
+            type="checkbox"
+            checked={autoSync}
+            onChange={handleAutoSyncToggle}
+            disabled={isAutoSyncSaving}
+            style={{
+              width: '16px',
+              height: '16px',
+              accentColor: 'var(--accent)',
+              cursor: isAutoSyncSaving ? 'wait' : 'pointer',
+              marginTop: '3px',
+              flexShrink: 0,
+            }}
+          />
+          <div>
+            <div style={{
+              fontSize: '13.5px',
+              fontWeight: '600',
+              color: 'var(--ink)',
+              marginBottom: '5px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}>
+              Auto-sync available models on launch
+              {isAutoSyncSaving && (
+                <span style={{ fontSize: '11px', color: 'var(--ink-3)', fontWeight: '400' }}>
+                  saving…
+                </span>
+              )}
+            </div>
+            <p style={{ fontSize: '12px', color: 'var(--ink-2)', lineHeight: '1.55', margin: 0 }}>
+              On application startup, newly available Gemini models are discovered automatically, enabled for payload
+              logging, and applied to Vertex AI — zero-ops support for new model releases. New models still need
+              pricing added in <strong>Pricing &amp; Planner</strong> to contribute costs.
+            </p>
+          </div>
+        </label>
+      </div>
+
       {isLoading ? (
         <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-secondary)' }}>
           Loading Vertex foundation model statuses...
@@ -480,68 +543,6 @@ export default function ModelLogging() {
             </button>
           </div>
 
-          {/* Auto-sync settings block */}
-          <div style={{
-            border: '1px solid var(--line)',
-            borderRadius: 'var(--radius)',
-            padding: '18px 20px',
-            backgroundColor: 'var(--surface-2)',
-          }}>
-            <div style={{
-              fontSize: '11px',
-              fontWeight: '700',
-              textTransform: 'uppercase',
-              letterSpacing: '0.09em',
-              color: 'var(--ink-3)',
-              marginBottom: '14px',
-            }}>
-              Startup Settings
-            </div>
-            <label style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '12px',
-              cursor: isAutoSyncSaving ? 'wait' : 'pointer',
-            }}>
-              <input
-                type="checkbox"
-                checked={autoSync}
-                onChange={handleAutoSyncToggle}
-                disabled={isAutoSyncSaving}
-                style={{
-                  width: '16px',
-                  height: '16px',
-                  accentColor: 'var(--accent)',
-                  cursor: isAutoSyncSaving ? 'wait' : 'pointer',
-                  marginTop: '3px',
-                  flexShrink: 0,
-                }}
-              />
-              <div>
-                <div style={{
-                  fontSize: '13.5px',
-                  fontWeight: '600',
-                  color: 'var(--ink)',
-                  marginBottom: '5px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                }}>
-                  Auto-sync available models on launch
-                  {isAutoSyncSaving && (
-                    <span style={{ fontSize: '11px', color: 'var(--ink-3)', fontWeight: '400' }}>
-                      saving…
-                    </span>
-                  )}
-                </div>
-                <p style={{ fontSize: '12px', color: 'var(--ink-2)', lineHeight: '1.55', margin: 0 }}>
-                  On application startup, newly available Gemini models are discovered automatically, enabled for payload
-                  logging, and applied to Vertex AI — zero-ops support for new model releases. New models still need
-                  pricing added in <strong>Pricing &amp; Planner</strong> to contribute costs.
-                </p>
-              </div>
-            </label>
-          </div>
 
         </div>
       )}

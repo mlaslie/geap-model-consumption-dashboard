@@ -363,8 +363,11 @@ export default function UsageCharts({ logs, loggingConfig, chartRange = 'month',
               No active tokens or activated models to display.
             </div>
           ) : (
-            <div className="model-pill-legend">
-              {Object.entries(modelShare).map(([model, tokens]) => {
+            <div className="model-pill-legend model-share-scroll">
+              {/* Largest consumption first; the list scrolls independently so
+                  a long model roster can't stretch the dashboard row (and the
+                  Cost Trend chart with it). */}
+              {Object.entries(modelShare).sort((a, b) => b[1] - a[1]).map(([model, tokens]) => {
                 const pct = totalShareTokens > 0 ? (tokens / totalShareTokens) * 100 : 0;
                 const dotColor = getModelColorShare(model);
                 return (

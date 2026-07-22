@@ -1457,3 +1457,12 @@ select.form-control {
   font-size: 9px;
   opacity: 0.7;
 }
+
+/* Model Share list scrolls independently so a long model roster cannot
+   stretch the dashboard grid row (which would stretch the Cost Trend chart) */
+.model-share-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+}
