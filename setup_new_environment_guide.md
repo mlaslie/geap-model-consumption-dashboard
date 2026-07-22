@@ -251,14 +251,23 @@ The sink routes matching audit log entries into the BigQuery dataset. The filter
 ```bash
 gcloud logging sinks create vertex-ai-telemetry-sink \
     bigquery.googleapis.com/projects/$PROJECT_ID/datasets/vertex_ai_user_telemetry \
+    --use-partitioned-tables \
     --log-filter='log_id("cloudaudit.googleapis.com/data_access") AND protoPayload.serviceName="aiplatform.googleapis.com" AND (protoPayload.methodName:"GenerateContent" OR protoPayload.methodName:"Predict")'
 ```
 
 > **Why this exact filter?** The `log_id(...)` predicate restricts the sink to Data Access logs only (not Admin Activity or System Event logs). The `:` operator means "contains", which matches method name substrings. A filter using SQL `LIKE` syntax will compile silently but match zero entries and the audit table will never appear.
 
+> [!NOTE]
+> `--use-partitioned-tables` makes the sink write one partitioned table
+> (`cloudaudit_googleapis_com_data_access`). Without the flag, Cloud Logging's
+> default creates **date-sharded** tables (`cloudaudit_..._YYYYMMDD`) instead.
+> The chargeback view queries a table wildcard, so it works with either mode
+> (including pre-existing sharded sinks) — partitioned is simply cheaper to
+> query and recommended for new sinks.
+
 ### 5c. Grant the sink's writer service account WRITER access on the dataset
 
-GCP Logging uses a dedicated service account to write into BigQuery. You must grant it write access — without this, exports succeed silently on the logging side but nothing lands in BigQuery.
+GCP Logging uses a dedicated service account to write into BigQuery. You must grant it write access — **without this, exports fail silently: the sink reports nothing, and no table ever appears in BigQuery.** This is the single most commonly missed step.
 
 **Recommended: dataset-level WRITER (least privilege)**
 

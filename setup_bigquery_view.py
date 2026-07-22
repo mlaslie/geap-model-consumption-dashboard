@@ -101,7 +101,11 @@ WITH audit_identities AS (
       ELSE 'regional'
     END AS region
   FROM
-    `{PROJECT_ID}.{DATASET_ID}.cloudaudit_googleapis_com_data_access`
+    -- Wildcard tolerates BOTH sink export modes: a single partitioned table
+    -- (sink created with --use-partitioned-tables) and date-sharded tables
+    -- (cloudaudit_..._YYYYMMDD, Cloud Logging's default). insertId dedupe
+    -- above also covers any overlap if a sink was switched between modes.
+    `{PROJECT_ID}.{DATASET_ID}.cloudaudit_googleapis_com_data_access*`
   WHERE
     protopayload_auditlog.serviceName = 'aiplatform.googleapis.com'
     AND (

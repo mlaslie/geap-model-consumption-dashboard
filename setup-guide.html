@@ -988,6 +988,7 @@ T['s5a-verify'] =
 T['s5b-sink'] =
   'gcloud logging sinks create vertex-ai-telemetry-sink \\\n' +
   '    bigquery.googleapis.com/projects/{{PROJECT_ID}}/datasets/{{BIGQUERY_DATASET}} \\\n' +
+  '    --use-partitioned-tables \\\n' +
   '    --log-filter=\'log_id("cloudaudit.googleapis.com/data_access") AND protoPayload.serviceName="aiplatform.googleapis.com" AND (protoPayload.methodName:"GenerateContent" OR protoPayload.methodName:"Predict")\'';
 
 T['s5c-writer'] =
