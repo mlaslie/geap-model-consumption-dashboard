@@ -22,6 +22,7 @@ from backend.gcs_client import load_budgets, save_budgets
 from backend.estimates_client import load_estimates, save_estimates
 from backend.ai_assistant import query_finops_assistant, AssistantUnavailableError
 from backend.auth import require_auth
+from backend.model_catalog import list_available_models, ModelCatalogError
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,13 @@ from backend.constants import PERIOD_DAYS
 _CHAT_RATE_LIMIT_MAX = 10
 _CHAT_RATE_LIMIT_WINDOW = 60.0  # seconds
 _chat_request_times: collections.deque = collections.deque()
+
+# ---------------------------------------------------------------------------
+# Module-level TTL cache for /api/available-models (5-minute window).
+# Tuple of (monotonic_timestamp: float, models: List[str]) or None.
+# ---------------------------------------------------------------------------
+_AVAILABLE_MODELS_TTL = 300.0  # 5 minutes
+_available_models_cache: Optional[tuple] = None  # (ts, List[str])
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +85,30 @@ def _fetch_period_user_totals(budgets: Dict) -> Dict[str, Dict[str, Dict[str, fl
 
 
 # ---------------------------------------------------------------------------
+# Auto-sync merge helper — pure function, easily unit-tested.
+# ---------------------------------------------------------------------------
+
+def _auto_sync_models(available: List[str], config: Dict[str, bool]) -> tuple:
+    """
+    Merges newly discovered models into an existing logging config.
+
+    - Models already in config keep their current bool value unchanged.
+    - Newly discovered models are added with True (auto-enable per product spec).
+    - Models absent from 'available' are left untouched in config.
+
+    Returns:
+        (merged_config: dict, newly_added: List[str])
+    """
+    merged = dict(config)
+    newly_added: List[str] = []
+    for model in available:
+        if model not in merged:
+            merged[model] = True
+            newly_added.append(model)
+    return merged, newly_added
+
+
+# ---------------------------------------------------------------------------
 # Lifespan — replaces deprecated @app.on_event (#19)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
@@ -109,6 +141,44 @@ async def lifespan(app: FastAPI):
         logger.info(
             "Startup: APPLY_LOGGING_ON_STARTUP is not set; "
             "skipping automatic Vertex AI logging config apply."
+        )
+
+    # --- auto-sync model catalog (UI-managed; never crashes startup) ---
+    try:
+        from backend.logging_client import (
+            load_model_sync_config,
+            load_logging_config,
+            save_logging_config,
+            apply_vertex_logging,
+        )
+
+        sync_cfg = load_model_sync_config()
+        if sync_cfg.get("auto_sync_on_startup", False):
+            logger.info("Auto-sync: discovering available Gemini models…")
+            available = list_available_models()
+            current_config = load_logging_config()
+            merged, newly_added = _auto_sync_models(available, current_config)
+            logger.info(
+                "Auto-sync: discovered %d models, %d new (enabled): %s",
+                len(available),
+                len(newly_added),
+                newly_added,
+            )
+            if newly_added:
+                save_logging_config(merged)
+                result = apply_vertex_logging(merged)
+                if result.get("all_succeeded"):
+                    logger.info("Auto-sync: all model logging configs applied successfully.")
+                else:
+                    logger.warning(
+                        "Auto-sync: logging config applied with partial failures: %s",
+                        result.get("results"),
+                    )
+        else:
+            logger.info("Auto-sync disabled (auto_sync_on_startup=false).")
+    except Exception:
+        logger.exception(
+            "Auto-sync: failed to sync model catalog at startup — continuing."
         )
 
     yield
@@ -213,6 +283,10 @@ class Estimate(BaseModel):
         if not stripped:
             raise ValueError("name must not be empty or whitespace-only")
         return stripped
+
+
+class ModelSyncConfig(BaseModel):
+    auto_sync_on_startup: bool
 
 
 # ---------------------------------------------------------------------------
@@ -825,6 +899,80 @@ def delete_estimate(name: str):
         raise
     except Exception:
         logger.exception("Error deleting estimate")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ---------------------------------------------------------------------------
+# Model catalog / auto-sync endpoints
+# ---------------------------------------------------------------------------
+
+@api_router.get("/available-models")
+def get_available_models(force: bool = False):
+    """
+    Returns the list of available Gemini models from the Vertex AI API.
+
+    Results are cached for 5 minutes per process.  Pass ?force=true to bypass
+    the cache (e.g. the UI refresh button).
+
+    Returns 503 on catalog/API failures so the frontend can surface a clear
+    error without exposing internal details.
+    """
+    global _available_models_cache
+
+    now = time.monotonic()
+    if not force and _available_models_cache is not None:
+        ts, cached_models = _available_models_cache
+        if now - ts < _AVAILABLE_MODELS_TTL:
+            return {"status": "success", "data": {"models": cached_models}}
+
+    try:
+        models = list_available_models()
+        _available_models_cache = (now, models)
+        return {"status": "success", "data": {"models": models}}
+    except ModelCatalogError as exc:
+        logger.warning("Model catalog unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Model catalog unavailable — check Vertex AI credentials/config",
+        )
+    except Exception:
+        logger.exception("Unexpected error fetching available models")
+        raise HTTPException(
+            status_code=503,
+            detail="Model catalog unavailable — check Vertex AI credentials/config",
+        )
+
+
+@api_router.get("/model-sync-config")
+def get_model_sync_config():
+    """Returns the persisted model-sync settings."""
+    try:
+        from backend.logging_client import load_model_sync_config
+
+        cfg = load_model_sync_config()
+        return {"status": "success", "data": cfg}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error loading model-sync config")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@api_router.post("/model-sync-config")
+def update_model_sync_config(body: ModelSyncConfig):
+    """Saves the model-sync settings and returns the saved data."""
+    try:
+        from backend.logging_client import save_model_sync_config
+
+        cfg = body.model_dump()
+        saved = save_model_sync_config(cfg)
+        if not saved:
+            raise HTTPException(status_code=500, detail="Internal server error")
+        return {"status": "success", "data": cfg}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error saving model-sync config")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

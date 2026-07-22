@@ -4,6 +4,7 @@ import { formatCurrency, formatTokens } from '../utils/formatters';
 export default function SummaryCards({ logs, alerts }) {
   // Compute metrics
   const totalCost = logs.reduce((sum, log) => sum + (log.estimated_cost_usd || 0), 0);
+  const hasUnpriced = logs.some(log => log.pricing_match === 'default');
   const totalTokens = logs.reduce((sum, log) => sum + (log.total_tokens || 0), 0);
   
   // Group by user to find the top spender
@@ -33,7 +34,12 @@ export default function SummaryCards({ logs, alerts }) {
           <span style={{color: 'var(--accent-indigo)'}}>USD</span>
         </div>
         <div className="kpi-value">{formatCurrency(totalCost)}</div>
-        <div className="kpi-footer">Accumulated cloud spend (30d)</div>
+        <div className="kpi-footer">
+          Accumulated cloud spend (30d)
+          {hasUnpriced && (
+            <span style={{ fontSize: '10px', color: 'var(--ink-3)' }}> · excludes unpriced models</span>
+          )}
+        </div>
       </div>
       
       <div className="kpi-card emerald-hover">

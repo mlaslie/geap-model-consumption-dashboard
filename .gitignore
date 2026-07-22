@@ -6,6 +6,11 @@ iam_policy.json
 budgets.json
 logging_config.json
 estimates.json
+model_sync.json
+
+# User-owned pricing config (seeded from pricing.defaults.json on first run;
+# edited via the Pricing & Planner UI — never clobbered by updates)
+backend/pricing.json
 
 # Build artifacts
 backend/static/

@@ -47,6 +47,7 @@ export default function UserTable({ logs, budgets, budgetStatus }) {
         totalTokens: 0,
         cost: 0.0,
         hasDefaultPricing: false,
+        hasPricedLogs: false,
       };
     }
 
@@ -59,6 +60,8 @@ export default function UserTable({ logs, budgets, budgetStatus }) {
     row.cost += log.estimated_cost_usd || 0;
     if (log.pricing_match === 'default') {
       row.hasDefaultPricing = true;
+    } else {
+      row.hasPricedLogs = true;
     }
   });
 
@@ -217,10 +220,24 @@ export default function UserTable({ logs, budgets, budgetStatus }) {
                       <span style={{color: 'var(--text-muted)'}}>{formatTokens(r.outputTokens)}</span>
                     </td>
                     <td
-                      style={{fontFamily: 'var(--font-mono)', fontWeight: '500'}}
-                      title={r.hasDefaultPricing ? 'Includes estimated default pricing for unrecognized models' : undefined}
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontWeight: '500',
+                        color: (r.hasDefaultPricing && !r.hasPricedLogs) ? 'var(--status-warn-text)' : undefined,
+                      }}
+                      title={
+                        (r.hasDefaultPricing && !r.hasPricedLogs)
+                          ? 'No pricing configured for this model — add it in Pricing & Planner'
+                          : (r.hasDefaultPricing && r.hasPricedLogs)
+                          ? 'Includes unpriced usage — configure this model in Pricing & Planner'
+                          : undefined
+                      }
                     >
-                      {r.hasDefaultPricing ? `~${formatCurrency(r.cost)}` : formatCurrency(r.cost)}
+                      {(r.hasDefaultPricing && !r.hasPricedLogs)
+                        ? 'unpriced'
+                        : (r.hasDefaultPricing && r.hasPricedLogs)
+                        ? `~${formatCurrency(r.cost)}`
+                        : formatCurrency(r.cost)}
                     </td>
                     <td>
                       {firstRowForUser ? (

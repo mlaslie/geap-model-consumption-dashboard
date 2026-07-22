@@ -93,7 +93,7 @@ function makeEmptyLine(modelIds) {
   };
 }
 
-export default function PricingPlanner() {
+export default function PricingPlanner({ unpricedModels = [] }) {
   /* ── Pricing state ── */
   const [editedPricing, setEditedPricing] = useState({});
   const [pricingLoading, setPricingLoading] = useState(true);
@@ -119,8 +119,11 @@ export default function PricingPlanner() {
   const [builderItems, setBuilderItems] = useState([]);
   const [builderErrors, setBuilderErrors] = useState({});
 
+  /* Unpriced model detection — raw model names from usage API with pricing_match === 'default' */
+  const [rawUsageUnpricedModels, setRawUsageUnpricedModels] = useState([]);
+
   /* ── Load on mount ── */
-  useEffect(() => { fetchPricing(); fetchEstimates(); }, []);
+  useEffect(() => { fetchPricing(); fetchEstimates(); fetchUsageForUnpriced(); }, []);
 
   /* ── Notification helpers ── */
   const showPricingNotif = (message, type = 'success') => {
@@ -133,6 +136,24 @@ export default function PricingPlanner() {
   };
 
   /* ── API calls ── */
+  const fetchUsageForUnpriced = async () => {
+    try {
+      const res = await apiFetch('/api/usage?days=30');
+      const json = await res.json();
+      if (res.ok && json.status === 'success') {
+        const models = Array.from(new Set(
+          (json.data || [])
+            .filter(row => row.pricing_match === 'default')
+            .map(row => row.model_name)
+            .filter(Boolean)
+        ));
+        setRawUsageUnpricedModels(models);
+      }
+    } catch {
+      /* Silently ignore — unpriced detection is best-effort */
+    }
+  };
+
   const fetchPricing = async () => {
     setPricingLoading(true);
     try {
@@ -204,6 +225,14 @@ export default function PricingPlanner() {
     setNewGt200kRate('');
     setNewOutputRate('');
     setNewMultiplier('');
+  };
+
+  const handleQuickAddModel = (modelId) => {
+    if (!MODEL_ID_REGEX.test(modelId) || editedPricing[modelId]) return;
+    setEditedPricing(prev => ({
+      ...prev,
+      [modelId]: { input_cost_per_million: 0, output_cost_per_million: 0 },
+    }));
   };
 
   const handleSavePricing = async () => {
@@ -347,6 +376,17 @@ export default function PricingPlanner() {
     }
   };
 
+  /* ── Detected unpriced models (union of prop + fetched, minus already-priced) ── */
+  const pricingKeys = Object.keys(editedPricing);
+  const detectedUnpriced = !pricingLoading
+    ? Array.from(new Set([...rawUsageUnpricedModels, ...unpricedModels])).filter(model => {
+        if (!model) return false;
+        if (editedPricing[model]) return false;
+        if (pricingKeys.some(k => model.startsWith(k))) return false;
+        return true;
+      })
+    : [];
+
   /* ── Live computations ── */
   const builderTotals = computeBuilderTotals(builderItems, editedPricing);
 
@@ -370,6 +410,44 @@ export default function PricingPlanner() {
           </div>
         ) : (
           <>
+            {detectedUnpriced.length > 0 && (
+              <div style={{
+                marginBottom: '16px',
+                padding: '12px 16px',
+                borderRadius: 'var(--radius)',
+                background: 'var(--status-warn-bg)',
+                border: '1px solid var(--status-warn-fill)',
+              }}>
+                <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--status-warn-text)', marginBottom: '10px' }}>
+                  Detected unpriced models
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {detectedUnpriced.map(model => (
+                    <div key={model} style={{
+                      display: 'flex', alignItems: 'center', gap: '6px',
+                      background: 'var(--surface)', borderRadius: 'var(--radius)',
+                      padding: '4px 10px', border: '1px solid var(--status-warn-fill)',
+                    }}>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--ink-2)' }}>
+                        {model}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleQuickAddModel(model)}
+                        style={{
+                          background: 'var(--accent)', border: 'none', color: '#fff',
+                          borderRadius: '4px', padding: '2px 8px', fontSize: '11px',
+                          fontWeight: '600', cursor: 'pointer', lineHeight: '1.6',
+                        }}
+                      >
+                        + Add
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="custom-table-container" style={{ marginBottom: '12px' }}>
               <table className="custom-table">
                 <thead>

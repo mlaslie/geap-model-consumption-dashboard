@@ -133,6 +133,56 @@ python -m pytest tests/ -q
 
 ---
 
+## Updating
+
+```bash
+./update.sh
+```
+
+That is the entire command. The script handles pulling, dependency updates, the frontend build, and the BigQuery view migration automatically. All user state is preserved.
+
+### What survives an update
+
+| State | Where it lives | Survives `git pull`? |
+|---|---|---|
+| GCP credentials & config | `.env` | Yes — gitignored, never touched |
+| User pricing table | `backend/pricing.json` | Yes — gitignored, user-owned |
+| Budget rules (local) | `budgets.json` | Yes — gitignored |
+| Payload logging config (local) | `logging_config.json` | Yes — gitignored |
+| Financial estimates (local) | `estimates.json` | Yes — gitignored |
+| Model catalogue sync state | `model_sync.json` | Yes — gitignored |
+| Budget rules / estimates / logging config (Cloud Run) | GCS bucket (`GCS_BUCKET_NAME`) | Yes — stored in GCS, never on disk |
+
+### Pricing file split (`pricing.defaults.json` vs `pricing.json`)
+
+Starting from this version, pricing is managed as two files:
+
+- **`backend/pricing.defaults.json`** — shipped default rates; tracked by git; updated when new models are added in a release. Never edited at runtime.
+- **`backend/pricing.json`** — runtime, user-owned config; **not tracked by git**. Edited via the **Pricing & Planner** UI or directly. On first run (or after a fresh clone) the app seeds `pricing.json` by copying `pricing.defaults.json` to it, then uses `pricing.json` exclusively from that point forward. A `git pull` never touches `pricing.json`.
+
+### Cloud Run update path
+
+State on Cloud Run lives in your GCS bucket (`budgets.json`, `logging_config.json`, `estimates.json`) and is never affected by a redeploy. After `./update.sh` completes locally, rebuild and redeploy the container:
+
+```bash
+gcloud builds submit --tag gcr.io/$PROJECT_ID/vertex-ai-consumption-portal
+gcloud run deploy vertex-consumption-portal \
+    --image gcr.io/$PROJECT_ID/vertex-ai-consumption-portal \
+    --region us-central1 --no-allow-unauthenticated
+```
+
+See [setup_new_environment_guide.md](setup_new_environment_guide.md) Step 10 for the full flags and runtime service account configuration.
+
+### BigQuery view migrations
+
+`./update.sh` runs `setup_bigquery_view.py` automatically as its last step. The script is idempotent (`CREATE OR REPLACE VIEW`) and reads your `.env` for project/dataset/view names. If it fails (e.g. the BigQuery credentials aren't available in the shell running the script), the update continues with a warning and you can re-run it manually:
+
+```bash
+.venv/bin/python setup_bigquery_view.py
+```
+
+---
+
 ## Troubleshooting
 
 Quick checks and fixes for the most common problems, in the order they typically bite. Set these once:
@@ -290,7 +340,9 @@ All `/api/*` endpoints require `Authorization: Bearer <PORTAL_AUTH_TOKEN>`. `/he
 │   ├── logging_client.py       Vertex AI SDK payload logging manager
 │   ├── ai_assistant.py         FinOps copilot — gemini-3.6-flash with spend context
 │   ├── constants.py            Shared PERIOD_DAYS mapping
-│   ├── pricing.json            Per-model token pricing (USD / million tokens)
+│   ├── pricing.defaults.json   Shipped default rates (tracked; never edited at runtime)
+│   ├── pricing.json            Runtime user-owned pricing (gitignored; seeded from
+│   │                           pricing.defaults.json on first run; edited via UI)
 │   └── static/                 Compiled React SPA (created by `npm run build`)
 ├── frontend/                   Vite + React 19 SPA
 │   ├── src/
@@ -300,6 +352,7 @@ All `/api/*` endpoints require `Authorization: Bearer <PORTAL_AUTH_TOKEN>`. `/he
 │   ├── vite.config.js          Dev proxy → 127.0.0.1:8000; build → ../backend/static
 │   └── package.json
 ├── tests/                      pytest suite (16 test modules)
+├── update.sh                   One-command update: pull → deps → build → BQ migration
 ├── setup_bigquery_view.py      Creates the user_token_chargebacks BQ view
 ├── enable_audit_logs.py        Merges Vertex AI Data Access audit config into IAM policy
 ├── Dockerfile                  Multi-stage build: node:20-alpine → python:3.11-slim

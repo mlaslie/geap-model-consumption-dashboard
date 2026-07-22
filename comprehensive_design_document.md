@@ -159,7 +159,7 @@ All `/api/*` endpoints require an `Authorization: Bearer <token>` header when `P
   }
   ```
   - `model_name` is the normalized model identifier (e.g. `gemini-2.5-pro`), not `model_id`.
-  - `pricing_match` is `"exact"`, `"prefix"`, or `"default"` — indicates how the cost rate was resolved.
+  - `pricing_match` is `"exact"` or `"prefix"` (priced) or `"default"` (**unpriced** — the model has no pricing entry; its cost contribution is $0 until it is added via Pricing & Planner, after which all costs recompute with the real rates).
   - `pricing_tier` is `"le200k"` or `"gt200k"` — the per-request input-context tier used for rate selection (rows are aggregated per tier).
   - `region` is `"global"` or `"regional"` — the endpoint region used for rate selection (regional applies the model's `non_global_multiplier`).
   - `call_count` is the true API call count within the row's day bucket (requires the daily-grain view).

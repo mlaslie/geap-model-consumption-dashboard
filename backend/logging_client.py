@@ -23,6 +23,9 @@ def _atomic_write_json(path: str, data) -> None:
 
 
 LOCAL_LOGGING_FILE = "logging_config.json"
+LOCAL_MODEL_SYNC_FILE = "model_sync.json"
+
+DEFAULT_MODEL_SYNC_CONFIG = {"auto_sync_on_startup": False}
 
 DEFAULT_LOGGING_CONFIG = {
     "gemini-2.5-pro": True,
@@ -120,6 +123,89 @@ def save_logging_config(config_data: Dict[str, bool]) -> bool:
 
     # No GCS configured — success = local write success
     return local_ok
+
+def load_model_sync_config() -> dict:
+    """
+    Loads model-sync settings from GCS (blob "config/model_sync.json") when
+    GCS_BUCKET_NAME is set, otherwise from a local file.
+
+    Fail-closed when GCS is configured — same semantics as load_logging_config:
+    a missing blob initialises defaults; a read error re-raises as RuntimeError.
+    """
+    if settings.GCS_BUCKET_NAME:
+        try:
+            from google.cloud import storage
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(settings.GCS_BUCKET_NAME)
+            blob = bucket.blob("config/model_sync.json")
+            if blob.exists():
+                data = blob.download_as_text()
+                return json.loads(data)
+            else:
+                save_model_sync_config(DEFAULT_MODEL_SYNC_CONFIG)
+                return dict(DEFAULT_MODEL_SYNC_CONFIG)
+        except Exception as e:
+            logger.error(
+                "Failed to load model-sync config from GCS bucket '%s': %s",
+                settings.GCS_BUCKET_NAME, e,
+            )
+            raise RuntimeError(
+                f"Failed to load model-sync config from GCS bucket "
+                f"'{settings.GCS_BUCKET_NAME}': {type(e).__name__}"
+            ) from e
+
+    # Local fallback
+    if os.path.exists(LOCAL_MODEL_SYNC_FILE):
+        try:
+            with open(LOCAL_MODEL_SYNC_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error("Failed to read local model-sync config: %s.", e)
+            return dict(DEFAULT_MODEL_SYNC_CONFIG)
+    else:
+        save_model_sync_config(DEFAULT_MODEL_SYNC_CONFIG)
+        return dict(DEFAULT_MODEL_SYNC_CONFIG)
+
+
+def save_model_sync_config(cfg: dict) -> bool:
+    """
+    Saves model-sync settings.  Mirrors save_logging_config semantics:
+    - GCS configured → GCS write is authoritative; local write is best-effort cache.
+    - No GCS → local write is authoritative.
+    Returns True on success, False on failure.
+    """
+    local_ok = False
+    try:
+        _atomic_write_json(LOCAL_MODEL_SYNC_FILE, cfg)
+        local_ok = True
+    except Exception as e:
+        logger.error("Failed to save model-sync config locally: %s", e)
+
+    if settings.GCS_BUCKET_NAME:
+        try:
+            from google.cloud import storage
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(settings.GCS_BUCKET_NAME)
+            blob = bucket.blob("config/model_sync.json")
+            blob.upload_from_string(
+                data=json.dumps(cfg, indent=4),
+                content_type="application/json",
+            )
+            logger.info(
+                "Saved model-sync config to GCS bucket: %s",
+                settings.GCS_BUCKET_NAME,
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "Failed to save model-sync config to GCS bucket '%s': %s. "
+                "Local state may diverge across instances.",
+                settings.GCS_BUCKET_NAME, e,
+            )
+            return False
+
+    return local_ok
+
 
 def apply_vertex_logging(config_data: Dict[str, bool]) -> dict:
     """

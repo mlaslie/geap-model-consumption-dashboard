@@ -804,7 +804,7 @@ curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
 | `/api/usage` returns HTTP 500 after upgrading | The view schema changed (e.g. new `pricing_tier` or `region` columns) but `setup_bigquery_view.py` has not been re-run. `bq_client.py` expects columns that do not yet exist in the view. | Re-run `python setup_bigquery_view.py` then restart the portal. |
 | Portal returns HTTP 401 and shows a token modal | `PORTAL_AUTH_TOKEN` is set in the environment. The frontend prompts for the token on a 401 response. | Enter the value of `PORTAL_AUTH_TOKEN` in the modal. The token is saved in `sessionStorage` for the session. |
 | FinOps Assistant returns HTTP 503 | The Vertex AI SDK call failed. Common causes: `BIGQUERY_PROJECT_ID` not set, `VERTEX_REGION` is invalid, or the runtime service account lacks `roles/aiplatform.user`. | Check startup logs for the SDK error. Verify `GEMINI_MODEL` is a valid model ID in your project and that ADC / service account credentials are valid. |
-| Cost column shows `~` prefix on model rows | The model name in the data was not found as an exact key in `backend/pricing.json`. The `~` prefix indicates a **default rate** was applied (the model is unrecognized) — it does not mean a prefix match succeeded. | Open `backend/pricing.json` and add an entry for the model name exactly as it appears in the `model_name` column in the API response. See `Guidelines for Future Enhancements` in `comprehensive_design_document.md`. |
+| Cost column shows `unpriced` (or `~` on mixed rows) | The model name has no entry in the pricing table (and no prefix match). Unrecognized models are **unpriced by design** — they appear on the dashboard and count toward token budgets, but contribute $0 to costs and money budgets until priced. | Open `backend/pricing.json` and add an entry for the model name exactly as it appears in the `model_name` column in the API response. See `Guidelines for Future Enhancements` in `comprehensive_design_document.md`. |
 | Sink filter validation (`gcloud logging read`) returns nothing | Before Step 9b: this is expected — there are no log entries yet. After Step 9b: audit logs are not enabled for `aiplatform.googleapis.com` (Step 4 was skipped or failed), or the filter predicate does not match the log structure. | After Step 9b, if still empty: re-run `enable_audit_logs.py`. Then re-validate the filter with `gcloud logging read` using the exact string from Step 5b. |
 | `bq ls` shows the audit table but `/api/usage` still returns `unattributed@unknown` | The view was not re-run after the table appeared. | `python setup_bigquery_view.py` |
 | Cloud Run service starts but BigQuery queries fail with `403 Access Denied` | The runtime service account lacks `roles/bigquery.jobUser` or dataset-level READER. | Apply the missing roles from Step 10b. |
@@ -814,8 +814,43 @@ curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
 ## Operational Notes
 
 - **Sinks are forward-only.** There is no mechanism to backfill historical log entries into a sink's BigQuery destination. Attribution starts at the moment the sink is correctly configured and the first matching entry is exported.
-- **Re-run `setup_bigquery_view.py` when upgrading.** Any upgrade that changes the view schema (e.g. new columns like `pricing_tier`, `region`) requires re-running the script. The script is idempotent (`CREATE OR REPLACE VIEW`).
+- **Re-run `setup_bigquery_view.py` when upgrading.** Any upgrade that changes the view schema (e.g. new columns like `pricing_tier`, `region`) requires re-running the script. The script is idempotent (`CREATE OR REPLACE VIEW`). `./update.sh` does this automatically.
 - **`request_response_logging` is auto-created.** Vertex AI creates this table the first time a logged call completes. Do not create it manually.
 - **`cloudaudit_googleapis_com_data_access` is auto-created by the sink.** It can take 5–15 minutes after the first matching log entry before the table appears in BigQuery.
 - **Privacy:** When payload logging is enabled, full user prompts and AI completions are stored in `request_response_logging`. Review `LOGGING_SAMPLING_RATE` and BigQuery table expiration policies before deploying in a privacy-sensitive environment.
 - **Multi-instance caveat:** Pricing edits via `POST /api/pricing` write only to the local container filesystem. On Cloud Run with multiple instances, pricing changes do not propagate to other replicas until restart. Run a single instance for config-editing workflows.
+
+### Updating the application
+
+To update an existing installation to the latest version, run the single update script from the repo root:
+
+```bash
+./update.sh
+```
+
+The script performs: preflight check → `git pull --ff-only` → Python dependency install → frontend build → BigQuery view migration. It exits immediately on any failure and prints a human-readable message explaining how to resolve it.
+
+**All user state is guaranteed to survive the update:**
+
+| State | Location | Safe? |
+|---|---|---|
+| GCP credentials & portal config | `.env` | Yes — gitignored |
+| User pricing table | `backend/pricing.json` | Yes — gitignored; never overwritten |
+| Budget rules (local) | `budgets.json` | Yes — gitignored |
+| Payload logging config (local) | `logging_config.json` | Yes — gitignored |
+| Financial estimates (local) | `estimates.json` | Yes — gitignored |
+| Model sync state | `model_sync.json` | Yes — gitignored |
+| GCS-stored config | your `GCS_BUCKET_NAME` bucket | Yes — not touched locally |
+
+**Pricing on first run:** `backend/pricing.json` (user-owned, gitignored) is seeded automatically from `backend/pricing.defaults.json` (shipped, tracked) the first time the app starts after a fresh clone or after the file is removed. Once seeded, `pricing.json` is yours — updates never touch it.
+
+**Cloud Run:** After `./update.sh` finishes locally, rebuild and redeploy the container image:
+
+```bash
+gcloud builds submit --tag gcr.io/$PROJECT_ID/vertex-ai-consumption-portal
+gcloud run deploy vertex-consumption-portal \
+    --image gcr.io/$PROJECT_ID/vertex-ai-consumption-portal \
+    --region us-central1 --no-allow-unauthenticated
+```
+
+All GCS-stored state (budgets, estimates, logging config) persists across Cloud Run redeploys automatically.

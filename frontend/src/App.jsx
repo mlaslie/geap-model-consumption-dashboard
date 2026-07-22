@@ -32,6 +32,10 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [apiError, setApiError] = useState(null);
   const [truncated, setTruncated] = useState(false);
+  // Stores the model list the user dismissed; if a DIFFERENT unpriced model
+  // appears later in the session, the notice returns (a plain boolean would
+  // hide genuinely new models behind an old dismissal).
+  const [dismissedUnpricedSig, setDismissedUnpricedSig] = useState(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authTokenInput, setAuthTokenInput] = useState('');
 
@@ -401,6 +405,11 @@ export default function App() {
     setShowAuthModal(false);
     fetchData();
   };
+
+  // Derive unique models with no pricing (pricing_match === 'default') across all logs
+  const unpricedModels = Array.from(new Set(
+    logs.filter(log => log.pricing_match === 'default').map(log => log.model_name).filter(Boolean)
+  )).sort();
 
   // Derive unique principals and models for dropdown filters
   const uniquePrincipals = Array.from(new Set(logs.map(log => log.user_email).filter(Boolean))).sort();
@@ -810,7 +819,7 @@ export default function App() {
                   display: 'flex',
                   gap: '16px',
                   alignItems: 'center',
-                  marginBottom: truncated ? '8px' : '20px',
+                  marginBottom: (truncated || (unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|'))) ? '8px' : '20px',
                   padding: '14px 18px',
                   flexWrap: 'wrap'
                 }}>
@@ -864,7 +873,7 @@ export default function App() {
                 {/* Truncation warning */}
                 {truncated && (
                   <div style={{
-                    marginBottom: '20px',
+                    marginBottom: unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|') ? '8px' : '20px',
                     padding: '8px 14px',
                     borderRadius: 'var(--radius)',
                     background: 'var(--status-warn-bg)',
@@ -874,6 +883,47 @@ export default function App() {
                     fontWeight: '500'
                   }}>
                     ⚠ Showing the most recent 1,000 rows — totals may undercount.
+                  </div>
+                )}
+
+                {/* Unpriced models notice */}
+                {unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|') && (
+                  <div style={{
+                    marginBottom: '20px',
+                    padding: '8px 14px',
+                    borderRadius: 'var(--radius)',
+                    background: 'var(--status-warn-bg)',
+                    border: '1px solid var(--status-warn-fill)',
+                    fontSize: '12px',
+                    color: 'var(--status-warn-text)',
+                    fontWeight: '500',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '12px',
+                  }}>
+                    <span>
+                      ⚠ {unpricedModels.length} model(s) have no pricing configured — their usage shows $0:{' '}
+                      {unpricedModels.join(', ')}.{' '}
+                      <a
+                        href="#planner"
+                        onClick={(e) => { e.preventDefault(); setActiveTab('planner'); }}
+                        style={{ color: 'var(--status-warn-text)', textDecoration: 'underline', cursor: 'pointer' }}
+                      >
+                        Add pricing →
+                      </a>
+                    </span>
+                    <button
+                      onClick={() => setDismissedUnpricedSig(unpricedModels.join('|'))}
+                      style={{
+                        background: 'none', border: 'none',
+                        color: 'var(--status-warn-text)', cursor: 'pointer',
+                        fontSize: '16px', lineHeight: '1', padding: '0 4px', flexShrink: 0,
+                      }}
+                      aria-label="Dismiss unpriced models notice"
+                    >
+                      ✕
+                    </button>
                   </div>
                 )}
 
@@ -907,7 +957,7 @@ export default function App() {
             )}
 
             {activeTab === 'planner' && (
-              <PricingPlanner />
+              <PricingPlanner unpricedModels={unpricedModels} />
             )}
 
           </div>

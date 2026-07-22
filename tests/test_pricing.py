@@ -1,11 +1,16 @@
 """
-Tests for normalize_model_name, resolve_pricing, and calculate_estimated_cost
+Tests for normalize_model_name, resolve_pricing, calculate_estimated_cost,
+and load_pricing_config (including the pricing.defaults.json seeding path)
 in backend.bq_client.
 
-All tests use an in-memory pricing dict so they are independent of pricing.json
-on disk.
+Arithmetic/resolution tests use in-memory pricing dicts and are independent
+of any file on disk.  Seeding tests monkeypatch PRICING_PATH and
+PRICING_DEFAULTS_PATH and never touch the real files.
 """
+import json
+import os
 import pytest
+import backend.bq_client as bq_client_module
 from backend.bq_client import normalize_model_name, resolve_pricing, calculate_estimated_cost
 
 # ---------------------------------------------------------------------------
@@ -108,17 +113,26 @@ class TestCalculateEstimatedCostResolution:
         # Should match 'gemini-2.5-flash', not 'gemini-2.5'
         assert cost == pytest.approx(0.075, rel=1e-6)
 
-    def test_unknown_model_uses_default_flash_rates(self):
-        """Unrecognised model falls back to current flash-class defaults (1.50 / 7.50 per M)."""
+    def test_unknown_model_is_unpriced(self):
+        """Unrecognised model contributes $0 (unpriced by design) until it is
+        added via Pricing & Planner — no invented default rate."""
         cost = calculate_estimated_cost(
-            "some-totally-unknown-model-xyz", 1_000_000, 0, PRICING
+            "some-totally-unknown-model-xyz", 1_000_000, 500_000, PRICING
         )
-        assert cost == pytest.approx(1.50, rel=1e-6)
+        assert cost == 0.0
 
-    def test_empty_model_name_uses_default_flash_rates(self):
-        """Empty string normalises to 'unknown' → no match → default output rate (7.50/M)."""
+    def test_empty_model_name_is_unpriced(self):
+        """Empty string normalises to 'unknown' → no match → unpriced ($0)."""
         cost = calculate_estimated_cost("", 0, 1_000_000, PRICING)
-        assert cost == pytest.approx(7.50, rel=1e-6)
+        assert cost == 0.0
+
+    def test_unknown_model_unpriced_even_regional_gt200k(self):
+        """Region/tier modifiers must not conjure a price for unpriced models."""
+        cost = calculate_estimated_cost(
+            "some-totally-unknown-model-xyz", 1_000_000, 1_000_000, PRICING,
+            tier="gt200k", region="regional",
+        )
+        assert cost == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -341,3 +355,83 @@ class TestBackwardCompatibility:
         cost_regional = calculate_estimated_cost("my-model", 1_000_000, 0, simple, region="us-central1")
         assert cost_global == pytest.approx(2.0, rel=1e-6)
         assert cost_regional == pytest.approx(2.0, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# load_pricing_config — seeding behaviour (pricing.defaults.json split)
+# ---------------------------------------------------------------------------
+
+_SAMPLE_DEFAULTS = {
+    "test-model": {"input_cost_per_million": 3.0, "output_cost_per_million": 6.0}
+}
+
+
+class TestLoadPricingConfigSeeding:
+    """Tests for the pricing.defaults.json seeding path.
+
+    All path constants are monkeypatched; the real backend/pricing.json and
+    backend/pricing.defaults.json are never read or written.
+    """
+
+    def test_seeding_creates_pricing_json_from_defaults(self, tmp_path, monkeypatch):
+        """When PRICING_PATH is absent but PRICING_DEFAULTS_PATH exists, pricing.json
+        is created (seeded) and its content is returned."""
+        defaults_file = tmp_path / "pricing.defaults.json"
+        pricing_file = tmp_path / "pricing.json"
+        defaults_file.write_text(json.dumps(_SAMPLE_DEFAULTS))
+
+        monkeypatch.setattr(bq_client_module, "PRICING_DEFAULTS_PATH", str(defaults_file))
+        monkeypatch.setattr(bq_client_module, "PRICING_PATH", str(pricing_file))
+
+        result = bq_client_module.load_pricing_config()
+
+        # Returned value matches the defaults content
+        assert result == _SAMPLE_DEFAULTS
+        # pricing.json was created on disk
+        assert pricing_file.exists()
+        assert json.loads(pricing_file.read_text()) == _SAMPLE_DEFAULTS
+
+    def test_existing_pricing_json_is_never_overwritten(self, tmp_path, monkeypatch):
+        """When PRICING_PATH already exists, its content is returned unchanged
+        and pricing.defaults.json is not consulted."""
+        user_pricing = {"my-custom-model": {"input_cost_per_million": 99.0, "output_cost_per_million": 99.0}}
+        pricing_file = tmp_path / "pricing.json"
+        pricing_file.write_text(json.dumps(user_pricing))
+
+        # Defaults file contains different data — must NOT win
+        defaults_file = tmp_path / "pricing.defaults.json"
+        defaults_file.write_text(json.dumps(_SAMPLE_DEFAULTS))
+
+        monkeypatch.setattr(bq_client_module, "PRICING_DEFAULTS_PATH", str(defaults_file))
+        monkeypatch.setattr(bq_client_module, "PRICING_PATH", str(pricing_file))
+
+        result = bq_client_module.load_pricing_config()
+
+        assert result == user_pricing
+
+    def test_both_missing_falls_back_to_in_code_defaults(self, tmp_path, monkeypatch):
+        """When neither PRICING_PATH nor PRICING_DEFAULTS_PATH exist, the in-code
+        default_pricing dict is returned as a last resort."""
+        monkeypatch.setattr(bq_client_module, "PRICING_DEFAULTS_PATH", str(tmp_path / "no-defaults.json"))
+        monkeypatch.setattr(bq_client_module, "PRICING_PATH", str(tmp_path / "no-pricing.json"))
+
+        result = bq_client_module.load_pricing_config()
+
+        # The in-code dict always has gemini-2.5-pro
+        assert "gemini-2.5-pro" in result
+        assert result["gemini-2.5-pro"]["input_cost_per_million"] == pytest.approx(1.25)
+
+    def test_seeded_file_is_valid_json_readable_again(self, tmp_path, monkeypatch):
+        """Seeded pricing.json is fully parseable JSON on subsequent reads."""
+        defaults_file = tmp_path / "pricing.defaults.json"
+        pricing_file = tmp_path / "pricing.json"
+        defaults_file.write_text(json.dumps(_SAMPLE_DEFAULTS))
+
+        monkeypatch.setattr(bq_client_module, "PRICING_DEFAULTS_PATH", str(defaults_file))
+        monkeypatch.setattr(bq_client_module, "PRICING_PATH", str(pricing_file))
+
+        bq_client_module.load_pricing_config()  # triggers seeding
+
+        # Simulate a second call (pricing.json now exists)
+        result2 = bq_client_module.load_pricing_config()
+        assert result2 == _SAMPLE_DEFAULTS

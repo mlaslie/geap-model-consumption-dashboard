@@ -4,6 +4,8 @@ import os
 import json
 import logging
 import re
+import shutil
+import tempfile
 import time
 from typing import Dict, List, Any, Optional, Tuple
 from backend.config import settings
@@ -41,14 +43,33 @@ def _validate_identifier(value: str, name: str) -> None:
         )
 
 
-# Path to the local pricing configuration file — exposed so callers (main.py,
-# tests) can reference or monkeypatch it without duplicating the computation.
+# Pricing file paths — both exposed so callers (main.py, tests) can monkeypatch
+# without duplicating path logic.
+#
+#   PRICING_DEFAULTS_PATH  — shipping default rates; tracked by git; never edited
+#                            at runtime.  backend/pricing.defaults.json.
+#   PRICING_PATH           — runtime, user-owned config; NOT tracked by git (see
+#                            .gitignore); edited via the Pricing & Planner UI or
+#                            by the user directly.  Seeded from PRICING_DEFAULTS_PATH
+#                            on first run when it does not exist.
+PRICING_DEFAULTS_PATH: str = os.path.join(os.path.dirname(__file__), "pricing.defaults.json")
 PRICING_PATH: str = os.path.join(os.path.dirname(__file__), "pricing.json")
 
 
 def load_pricing_config() -> Dict[str, Dict[str, float]]:
     """
     Loads model input/output pricing configurations from PRICING_PATH.
+
+    Resolution order when PRICING_PATH does not yet exist:
+      1. Seed PRICING_PATH by atomically copying PRICING_DEFAULTS_PATH to it,
+         then return its content.  This happens on first run after clone or after
+         ``git pull`` (pricing.json is untracked/gitignored so it is never
+         clobbered by updates).
+      2. If PRICING_DEFAULTS_PATH is also missing, fall back to the in-code
+         default_pricing dict below (last-resort safety net).
+
+    When PRICING_PATH already exists it is always used as-is so that user edits
+    made via the Pricing & Planner UI are never overwritten.
     """
     # Google Standard-tier global rates, July 2026.
     # Optional fields (input_cost_per_million_gt_200k, non_global_multiplier)
@@ -96,8 +117,32 @@ def load_pricing_config() -> Dict[str, Dict[str, float]]:
             "output_cost_per_million": 7.50,
         },
     }
+
     if not os.path.exists(PRICING_PATH):
+        # Try to seed pricing.json from the shipped defaults file.
+        if os.path.exists(PRICING_DEFAULTS_PATH):
+            try:
+                # Atomic write: write to a temp file in the same directory then
+                # rename so a concurrent reader never sees a partial file.
+                dest_dir = os.path.dirname(PRICING_PATH)
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=dest_dir, delete=False, suffix=".tmp"
+                ) as tmp:
+                    tmp_path = tmp.name
+                    with open(PRICING_DEFAULTS_PATH, "rb") as src:
+                        shutil.copyfileobj(src, tmp)
+                os.replace(tmp_path, PRICING_PATH)
+                logger.info("seeded pricing.json from shipped defaults")
+                with open(PRICING_PATH, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(
+                    "Could not seed pricing.json from pricing.defaults.json: %s — "
+                    "using in-code defaults",
+                    e,
+                )
         return default_pricing
+
     try:
         with open(PRICING_PATH, "r") as f:
             return json.load(f)
@@ -176,21 +221,19 @@ def calculate_estimated_cost(
     matched_pricing, match_kind = resolve_pricing(model_name, pricing)
 
     if match_kind == "default":
-        # Unknown model — use conservative defaults and surface the gap.
-        # Updated to current flash-class standard rates (1.50 in / 7.50 out);
-        # the previous defaults (0.075 / 0.30) were ~20x stale.
+        # Unknown model — UNPRICED by design: contribute $0 rather than an
+        # invented rate. The row still appears on the dashboard (tokens count
+        # toward token budgets) but adds nothing to money budgets/alerts until
+        # the model is added in Pricing & Planner, at which point reload_pricing()
+        # flushes caches and all costs recompute with the real rates.
+        # pricing_match='default' is the UI's "unpriced" signal.
         logger.warning(
-            "Unknown model %r: no pricing entry found. Using default flash rates.",
+            "Unknown model %r: no pricing entry found. Usage is UNPRICED ($0) "
+            "until the model is added via Pricing & Planner (/api/pricing).",
             normalize_model_name(model_name),
         )
-        input_rate = 1.50
-        output_rate = 7.50
-        # No per-model gt200k rate is known for unlisted models (le200k rates
-        # apply to all context sizes), but the regional premium is a uniform
-        # Google-wide +10%, so apply it to keep regional traffic comparable.
-        if region != "global":
-            input_rate *= 1.1
-            output_rate *= 1.1
+        input_rate = 0.0
+        output_rate = 0.0
     else:
         # .get() + None check (not `in`): a hand-edited pricing.json can carry
         # an explicit null, which must fall back to the base rate rather than
