@@ -133,6 +133,117 @@ python -m pytest tests/ -q
 
 ---
 
+## Troubleshooting
+
+Quick checks and fixes for the most common problems, in the order they typically bite. Set these once:
+
+```bash
+export PROJECT_ID=your-gcp-project-id
+export DATASET=vertex_ai_user_telemetry
+export SINK=vertex-ai-telemetry-sink
+```
+
+### 1. Every call shows as `unattributed@unknown`
+
+The #1 cause: the Cloud Logging sink's service account was never granted write access on the dataset, so audit-log exports fail silently and the identity data never reaches BigQuery.
+
+```bash
+# Check — the sink's writer SA must appear with role WRITER:
+SINK_SA=$(gcloud logging sinks describe $SINK --project=$PROJECT_ID --format="value(writerIdentity)" | sed 's/serviceAccount://')
+bq show --format=prettyjson $PROJECT_ID:$DATASET | grep -A2 "$SINK_SA" || echo "MISSING GRANT — this is your problem"
+```
+
+```bash
+# Fix — grant dataset-level WRITER to the sink SA:
+bq show --format=prettyjson $PROJECT_ID:$DATASET > /tmp/ds.json
+python3 -c "
+import json; d=json.load(open('/tmp/ds.json'))
+d['access'].append({'role':'WRITER','userByEmail':'$SINK_SA'})
+json.dump({'access':d['access']}, open('/tmp/ds-access.json','w'))"
+bq update --source /tmp/ds-access.json $PROJECT_ID:$DATASET
+```
+
+Then make one new call (`python trigger_call.py`), wait 5–15 minutes, and re-run `python setup_bigquery_view.py`. **Calls made before the grant stay unattributed forever** — sinks never backfill.
+
+### 2. The `cloudaudit_...` table never appears in BigQuery
+
+Either the grant above is missing, or the sink filter matches nothing (e.g. hand-edited with invalid syntax — Cloud Logging has no `LIKE` operator).
+
+```bash
+# Check — does the filter actually match entries? (make a Vertex call first)
+gcloud logging read "$(gcloud logging sinks describe $SINK --project=$PROJECT_ID --format='value(filter)')" \
+  --project=$PROJECT_ID --limit=1 --freshness=1d --format="value(timestamp)"
+# Empty output after a fresh call = broken filter
+```
+
+```bash
+# Fix — restore the known-good filter:
+gcloud logging sinks update $SINK --project=$PROJECT_ID \
+  --log-filter='log_id("cloudaudit.googleapis.com/data_access") AND protoPayload.serviceName="aiplatform.googleapis.com" AND (protoPayload.methodName:"GenerateContent" OR protoPayload.methodName:"Predict")'
+```
+
+### 3. Audit tables exist but are named `cloudaudit_..._YYYYMMDD` (date-sharded)
+
+Sinks created without `--use-partitioned-tables` shard by date. Current versions of the view handle both modes — if you see shards and still get `unattributed@unknown`, your view predates the fix.
+
+```bash
+# Fix — redeploy the view (queries a wildcard covering both modes):
+python setup_bigquery_view.py
+```
+
+### 4. No usage data at all (empty dashboard, `request_response_logging` missing)
+
+Payload logging isn't enabled, or no call has been made since enabling it. The table is created automatically on the first logged call.
+
+```bash
+# Check:
+bq ls --project_id=$PROJECT_ID $DATASET | grep request_response_logging || echo "no payload table yet"
+# Fix: enable the model in the portal's Model Logging tab (enable the SAME
+# model id as GEMINI_MODEL in .env), Apply, then:
+python trigger_call.py
+```
+
+### 5. Data Access audit logs aren't being generated at all
+
+```bash
+# Check — aiplatform must appear with DATA_READ/DATA_WRITE:
+gcloud projects get-iam-policy $PROJECT_ID --format="json(auditConfigs)" | grep -A3 aiplatform || echo "audit logs NOT enabled"
+# Fix (merges safely into the existing policy):
+python enable_audit_logs.py
+```
+
+### 6. `/api/usage` returns 500 after an upgrade
+
+The deployed view is older than the code (e.g. missing `pricing_tier`/`region`/`call_count` columns).
+
+```bash
+# Fix:
+python setup_bigquery_view.py
+```
+
+### 7. Browser shows the "API token required" modal or curl gets 401
+
+`PORTAL_AUTH_TOKEN` is set in `.env` — paste the same value into the modal. For curl, the token must be in your shell first:
+
+```bash
+export PORTAL_AUTH_TOKEN=<value-from-your-.env>
+curl -H "Authorization: Bearer $PORTAL_AUTH_TOKEN" http://127.0.0.1:8000/api/usage
+```
+
+### 8. FinOps assistant returns 503
+
+The backend can't reach Vertex AI — usually missing Application Default Credentials or a wrong project id.
+
+```bash
+# Fix:
+gcloud auth application-default login
+grep BIGQUERY_PROJECT_ID .env   # must be your real project id
+```
+
+For the full symptom table, see Step 11 of [setup_new_environment_guide.md](setup_new_environment_guide.md).
+
+---
+
 ## Security Notes
 
 - **Set `PORTAL_AUTH_TOKEN`** before exposing the portal on any non-local network. Without it all API endpoints are open. Consider Cloud IAP or authenticated Cloud Run invokers for production.
