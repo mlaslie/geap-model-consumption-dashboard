@@ -21,8 +21,10 @@ export default function ModelLogging() {
   }, [modelStates]);
 
   useEffect(() => {
-    fetchLoggingConfig();
-    fetchCatalog(false);
+    // Sequence config THEN catalog: the config fetch REPLACES modelStates, so
+    // a catalog merge that raced ahead of it would be clobbered (models from
+    // the catalog would vanish until Refresh was clicked).
+    fetchLoggingConfig().then(() => fetchCatalog(false));
     fetchAutoSyncConfig();
   }, []); // intentional mount-only
 
@@ -58,8 +60,11 @@ export default function ModelLogging() {
   };
 
   // ── Available-models catalog ──────────────────────────────────────────────
-  // force=false → populate catalogModels for "not in catalog" tags (no merge)
-  // force=true  → fetch fresh list, merge new models, mark as "new"
+  // BOTH paths merge catalog models into the displayed list (new ones
+  // unchecked, badged "new") so every available model shows on page load —
+  // not only after clicking Refresh. Differences:
+  //   force=false (mount) → served from the backend's 5-min cache; silent.
+  //   force=true (button) → fresh API fetch; shows the found/new notification.
   const fetchCatalog = async (force) => {
     const url = force ? '/api/available-models?force=true' : '/api/available-models';
     if (force) setIsRefreshing(true);
@@ -81,19 +86,22 @@ export default function ModelLogging() {
         const catalogSet = new Set(models);
         setCatalogModels(catalogSet);
 
-        if (force) {
-          // Read current state via ref so we don't get a stale closure value
-          const current = modelStatesRef.current;
-          const merged = { ...current };
-          const added = new Set();
-          for (const modelId of models) {
-            if (!(modelId in merged)) {
-              merged[modelId] = false;
-              added.add(modelId);
-            }
+        // Merge on BOTH paths so available models appear on page load.
+        // Read current state via ref so we don't get a stale closure value.
+        const current = modelStatesRef.current;
+        const merged = { ...current };
+        const added = new Set();
+        for (const modelId of models) {
+          if (!(modelId in merged)) {
+            merged[modelId] = false;
+            added.add(modelId);
           }
+        }
+        if (added.size > 0) {
           setModelStates(merged);
           setNewModels(prev => new Set([...prev, ...added]));
+        }
+        if (force) {
           showNotification(
             `Found ${models.length} available models — ${added.size} new`
           );
