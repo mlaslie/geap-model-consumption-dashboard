@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Platform Model Telemetry</title>
+    <script>
+      // Pre-paint theme application to avoid a flash of the wrong theme when
+      // the stored preference (light/dark) disagrees with the OS setting.
+      // Mirrors the logic in App.jsx; 'system' (default) leaves CSS in charge.
+      (function () {
+        try {
+          var t = localStorage.getItem('portal_theme');
+          if (t === 'light' || t === 'dark') {
+            document.documentElement.setAttribute('data-theme', t);
+          }
+        } catch (e) { /* storage unavailable — fall back to system theme */ }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

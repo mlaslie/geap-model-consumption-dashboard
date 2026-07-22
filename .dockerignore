@@ -1,0 +1,34 @@
+# Version control
+.git
+.gitignore
+
+# Python virtual environments and caches
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+
+# Node modules (frontend deps are installed in-stage)
+node_modules
+frontend/node_modules
+
+# Built frontend assets (produced inside the Docker build; not needed from host)
+backend/static
+
+# Secrets and environment files
+.env
+iam_policy.json
+
+# Runtime state files (written by the app at runtime; host copies should not leak in)
+budgets.json
+logging_config.json
+
+# Stale/large artifacts
+*.zip
+vertex_ai_consumption_portal.zip
+
+# Design docs and research materials
+ui-redesigns
+BACKLOG.md
+*.md

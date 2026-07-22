@@ -1,0 +1,23 @@
+# Secrets & environment
+.env
+iam_policy.json
+
+# Runtime state (local fallbacks written by the app)
+budgets.json
+logging_config.json
+estimates.json
+
+# Build artifacts
+backend/static/
+frontend/dist/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Distribution / stale artifacts
+*.zip
+
+# OS
+.DS_Store
