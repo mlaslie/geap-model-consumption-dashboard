@@ -85,8 +85,28 @@ if [ ! -d ".venv" ]; then
     python3 -m venv .venv
 fi
 
-info "Installing Python dependencies..."
-.venv/bin/pip install -r requirements.txt -q
+# Guard the two causes behind pip's cryptic "could not find a version that
+# satisfies the requirement" error: a venv built with a too-old Python, and
+# an unreachable package index.
+PYVER=$(.venv/bin/python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+PYOK=$(.venv/bin/python -c 'import sys; print(1 if sys.version_info >= (3, 11) else 0)')
+if [ "$PYOK" != "1" ]; then
+    echo "ERROR: .venv uses Python $PYVER but this project requires 3.11+."
+    echo "Recreate the venv with a modern interpreter and re-run:"
+    echo "    rm -rf .venv && python3.11 -m venv .venv && ./update.sh"
+    echo "(install one via https://www.python.org/downloads/ or 'brew install python@3.12')"
+    exit 1
+fi
+
+info "Installing Python dependencies (Python $PYVER)..."
+.venv/bin/pip install --upgrade pip -q
+if ! .venv/bin/pip install -r requirements.txt -q; then
+    echo "ERROR: pip could not install dependencies."
+    echo "If the message above says 'could not find a version ... (from versions: none)',"
+    echo "pip cannot reach the package index — check network/VPN/proxy, and verify with:"
+    echo "    curl -sI https://pypi.org/simple/fastapi/ | head -1   (expect HTTP 200)"
+    exit 1
+fi
 info "Python dependencies up to date."
 
 ###############################################################################
