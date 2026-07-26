@@ -3,6 +3,7 @@ import SummaryCards from './components/SummaryCards';
 import UsageCharts from './components/UsageCharts';
 import UserTable from './components/UserTable';
 import BudgetManager from './components/BudgetManager';
+import BudgetConsumption from './components/BudgetConsumption';
 import AlertCenter from './components/AlertCenter';
 import FinOpsAssistant from './components/FinOpsAssistant';
 import ModelLogging from './components/ModelLogging';
@@ -11,7 +12,16 @@ import { apiFetch, setApiToken } from './utils/api';
 import { formatDateTime } from './utils/formatters';
 
 
-const VALID_TABS = ['dashboard', 'budgets', 'planner', 'alerts', 'logging', 'assistant'];
+const VALID_TABS = [
+  'dashboard', 'budgets', 'budget-consumption', 'planner', 'alerts', 'logging', 'assistant',
+];
+
+// Dashboard time ranges → trailing-day window sent to /api/usage.
+const RANGE_TO_DAYS = { today: 1, week: 7, month: 30, '6months': 183, year: 366 };
+const RANGE_LABELS = {
+  today: 'Today', week: 'Last 7 days', month: 'Last 30 days',
+  '6months': 'Last 6 months', year: 'Last 12 months',
+};
 
 export default function App() {
   // Tabs are deep-linkable: /#planner opens the Pricing & Planner tab directly.
@@ -106,12 +116,15 @@ export default function App() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  // Fetch extended-range usage data when chartRange exceeds the default 30-day window
+  // Fetch usage for the selected range whenever it differs from the default
+  // 30-day feed. Every range except "month" is fetched server-side so the
+  // range scopes the WHOLE dashboard (summary cards and the per-principal
+  // table included), not just the chart's client-side bucketing — a table
+  // cannot bucket away out-of-range rows the way the chart can.
   useEffect(() => {
-    const rangeToDays = { today: 1, week: 7, month: 30, '6months': 183, year: 366 };
-    const days = rangeToDays[chartRange] || 30;
-    if (days <= 30) {
-      // Reuse the existing `logs` (filtered client-side in UsageCharts)
+    const days = RANGE_TO_DAYS[chartRange] || 30;
+    if (days === 30) {
+      // "month" is exactly the default feed already in `logs`.
       setChartLogs(null);
       setChartLoading(false);
       setChartTruncated(false);
@@ -415,21 +428,17 @@ export default function App() {
   const uniquePrincipals = Array.from(new Set(logs.map(log => log.user_email).filter(Boolean))).sort();
   const uniqueModels = Array.from(new Set(logs.map(log => log.model_name).filter(Boolean))).sort();
 
-  // Apply dashboard filtering
-  const filteredLogs = logs.filter(log => {
+  // Range-scoped rows drive the ENTIRE dashboard (summary cards, chart, and
+  // the per-principal table) so every figure on the page covers the same
+  // window. chartLogs holds the selected range; null means "month", which is
+  // exactly the default `logs` feed.
+  const rangeRows = chartLogs ?? logs;
+  const dashboardRows = rangeRows.filter(log => {
     const matchPrincipal = selectedPrincipal === 'all' || log.user_email === selectedPrincipal;
     const matchModel = selectedModel === 'all' || log.model_name === selectedModel;
     return matchPrincipal && matchModel;
   });
-
-  // Effective chart rows: use extended-range chartLogs when available, else fall back to logs.
-  // Apply the same principal/model filters so the chart respects the dashboard selectors.
-  const rawChartRows = chartLogs ?? logs;
-  const chartRows = rawChartRows.filter(log => {
-    const matchPrincipal = selectedPrincipal === 'all' || log.user_email === selectedPrincipal;
-    const matchModel = selectedModel === 'all' || log.model_name === selectedModel;
-    return matchPrincipal && matchModel;
-  });
+  const rangeLabel = RANGE_LABELS[chartRange] || 'Last 30 days';
 
   const themeOptions = [
     { value: 'light',  label: '☀ Light' },
@@ -527,6 +536,12 @@ export default function App() {
             <span className="nav-item-icon">💼</span> Budget Constraints
           </button>
           <button
+            className={`nav-item ${activeTab === 'budget-consumption' ? 'active' : ''}`}
+            onClick={() => setActiveTab('budget-consumption')}
+          >
+            <span className="nav-item-icon">📊</span> Budget Consumption
+          </button>
+          <button
             className={`nav-item ${activeTab === 'planner' ? 'active' : ''}`}
             onClick={() => setActiveTab('planner')}
           >
@@ -582,6 +597,7 @@ export default function App() {
             <h1 className="main-title">
               {activeTab === 'dashboard' && "Agent Platform Model Telemetry"}
               {activeTab === 'budgets' && "Corporate Budget Manager"}
+              {activeTab === 'budget-consumption' && "Budget Consumption"}
               {activeTab === 'alerts' && "Proactive Alerts Center"}
               {activeTab === 'logging' && "Vertex AI Model Logging"}
               {activeTab === 'assistant' && "Gemini FinOps Assistant"}
@@ -590,6 +606,7 @@ export default function App() {
             <p className="main-subtitle">
               {activeTab === 'dashboard' && "Multi-tenant resource-usage logs and estimated token cost recovery metrics."}
               {activeTab === 'budgets' && "Establish cost centers, assign spending allowances, and manage proactive limits."}
+              {activeTab === 'budget-consumption' && "Track live consumption against every configured budget constraint."}
               {activeTab === 'alerts' && "Review real-time over-budget flags and critical threshold compliance logs."}
               {activeTab === 'logging' && "Configure bigquery request-response telemetry for Gemini models on Vertex AI."}
               {activeTab === 'assistant' && "Leverage Gemini generative intelligence to query and clean up token spends."}
@@ -927,21 +944,29 @@ export default function App() {
                   </div>
                 )}
 
-                <SummaryCards logs={filteredLogs} alerts={alerts} />
+                <SummaryCards logs={dashboardRows} alerts={alerts} rangeLabel={rangeLabel} />
                 <UsageCharts
-                  logs={chartRows}
+                  logs={dashboardRows}
                   loggingConfig={loggingConfig}
                   chartRange={chartRange}
                   setChartRange={setChartRange}
                   chartLoading={chartLoading}
                   chartTruncated={chartTruncated}
                 />
-                <UserTable logs={filteredLogs} budgets={budgets} budgetStatus={budgetStatus} />
+                <UserTable logs={dashboardRows} budgets={budgets} budgetStatus={budgetStatus} rangeLabel={rangeLabel} />
               </div>
             )}
 
             {activeTab === 'budgets' && (
               <BudgetManager budgets={budgets} onSaveBudgets={handleSaveBudgets} />
+            )}
+
+            {activeTab === 'budget-consumption' && (
+              <BudgetConsumption
+                budgetStatus={budgetStatus}
+                budgets={budgets}
+                onNavigateToBudgets={() => setActiveTab('budgets')}
+              />
             )}
 
             {activeTab === 'alerts' && (

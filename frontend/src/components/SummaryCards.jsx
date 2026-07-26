@@ -1,7 +1,7 @@
 import React from 'react';
 import { formatCurrency, formatTokens } from '../utils/formatters';
 
-export default function SummaryCards({ logs, alerts }) {
+export default function SummaryCards({ logs, alerts, rangeLabel = 'Last 30 days' }) {
   // Compute metrics
   const totalCost = logs.reduce((sum, log) => sum + (log.estimated_cost_usd || 0), 0);
   const hasUnpriced = logs.some(log => log.pricing_match === 'default');
@@ -35,7 +35,7 @@ export default function SummaryCards({ logs, alerts }) {
         </div>
         <div className="kpi-value">{formatCurrency(totalCost)}</div>
         <div className="kpi-footer">
-          Accumulated cloud spend (30d)
+          Accumulated cloud spend · {rangeLabel.toLowerCase()}
           {hasUnpriced && (
             <span style={{ fontSize: '10px', color: 'var(--ink-3)' }}> · excludes unpriced models</span>
           )}

@@ -12,7 +12,7 @@ const COLUMNS = [
   { key: 'budget', label: 'Budget Consumption', defaultDir: 'desc' },
 ];
 
-export default function UserTable({ logs, budgets, budgetStatus }) {
+export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'Last 30 days' }) {
   const [searchTerm, setSearchTerm] = useState('');
   // Default order matches prior behavior: principals A→Z (with each user's
   // models by token volume as the tie-break).
@@ -148,7 +148,14 @@ export default function UserTable({ logs, budgets, budgetStatus }) {
   return (
     <div className="table-panel">
       <div className="table-header-row">
-        <h3 style={{fontSize: '18px', fontWeight: '600'}}>Per-Principal Token Consumption</h3>
+        <div>
+          <h3 style={{fontSize: '18px', fontWeight: '600'}}>Per-Principal Token Consumption</h3>
+          {/* Usage columns follow the dashboard range selector; the budget
+              column is scoped to each principal's own budget period instead. */}
+          <div style={{fontSize: '11px', color: 'var(--ink-3)', marginTop: '2px'}}>
+            Usage columns: {rangeLabel.toLowerCase()} · Budget column: each principal's budget period
+          </div>
+        </div>
         <input
           type="text"
           placeholder="Filter by principal or model..."
