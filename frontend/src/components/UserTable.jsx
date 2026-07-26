@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { formatCurrency, formatTokens, getModelBadgeClass } from '../utils/formatters';
+import { toCsv, downloadCsv, csvTimestamp } from '../utils/csv';
 
 // Sortable columns: key, header label, default direction on first click, and
 // whether the header cell is center-aligned.
@@ -140,6 +141,66 @@ export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'L
     if (!firstIndexByEmail.has(r.email)) firstIndexByEmail.set(r.email, i);
   });
 
+  // Budget values needed for CSV — raw period + numeric limit/pct (not formatted).
+  const csvBudgetFor = (email) => {
+    const statusEntry = budgetStatus && budgetStatus[email];
+    if (statusEntry) {
+      return {
+        period: statusEntry.period ?? '',
+        limit: statusEntry.limit,
+        pct: statusEntry.percentage ?? 0,
+      };
+    }
+    const budgetRule = budgets[email] || budgets["global_default"] || {
+      limit: 10000000,
+      type: 'token',
+    };
+    const totals = userTotals[email] || { cost: 0, tokens: 0 };
+    const consumed = budgetRule.type === 'money' ? totals.cost : totals.tokens;
+    return {
+      period: budgetRule.period ?? '',
+      limit: budgetRule.limit,
+      pct: budgetRule.limit > 0 ? (consumed / budgetRule.limit) * 100 : 0,
+    };
+  };
+
+  const CSV_COLUMNS = [
+    { key: 'principal_email', header: 'principal_email' },
+    { key: 'model',           header: 'model' },
+    { key: 'calls',           header: 'calls' },
+    { key: 'input_tokens',    header: 'input_tokens' },
+    { key: 'output_tokens',   header: 'output_tokens' },
+    { key: 'total_tokens',    header: 'total_tokens' },
+    { key: 'cost_usd',        header: 'cost_usd' },
+    { key: 'pricing_status',  header: 'pricing_status' },
+    { key: 'budget_period',   header: 'budget_period' },
+    { key: 'budget_limit',    header: 'budget_limit' },
+    { key: 'budget_percent',  header: 'budget_percent' },
+  ];
+
+  const handleExport = () => {
+    if (rowList.length === 0) return;
+    const csvRows = rowList.map(r => {
+      const { period, limit, pct } = csvBudgetFor(r.email);
+      const unpriced = r.hasDefaultPricing && !r.hasPricedLogs;
+      return {
+        principal_email: r.email,
+        model:           r.model,
+        calls:           r.calls,
+        input_tokens:    r.inputTokens,
+        output_tokens:   r.outputTokens,
+        total_tokens:    r.totalTokens,
+        cost_usd:        unpriced ? null : r.cost,
+        pricing_status:  unpriced ? 'unpriced' : 'priced',
+        budget_period:   period,
+        budget_limit:    limit,
+        budget_percent:  pct,
+      };
+    });
+    const slug = rangeLabel.toLowerCase().replace(/\s+/g, '-');
+    downloadCsv(`token-consumption-${slug}-${csvTimestamp()}.csv`, toCsv(CSV_COLUMNS, csvRows));
+  };
+
   // Helper to check if email is a Service Account
   const isServiceAccount = (email) => {
     return email.includes('.gserviceaccount.com') || email.includes('service-account');
@@ -156,13 +217,24 @@ export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'L
             Usage columns: {rangeLabel.toLowerCase()} · Budget column: each principal's budget period
           </div>
         </div>
-        <input
-          type="text"
-          placeholder="Filter by principal or model..."
-          className="table-search-input"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-        />
+        <div className="table-actions">
+          <input
+            type="text"
+            placeholder="Filter by principal or model..."
+            className="table-search-input"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handleExport}
+            disabled={rowList.length === 0}
+            title={rowList.length === 0 ? 'No rows to export' : `Export ${rowList.length} rows as CSV`}
+          >
+            ⤓ Export CSV
+          </button>
+        </div>
       </div>
 
       <div className="custom-table-container">

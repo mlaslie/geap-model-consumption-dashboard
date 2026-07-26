@@ -512,6 +512,11 @@ body {
   color: var(--accent);
 }
 
+.btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ==========================================================================
    Filter Bar Panel
    ========================================================================== */
@@ -892,6 +897,13 @@ body {
   align-items: center;
   margin-bottom: 20px;
   gap: 16px;
+}
+
+/* Groups the filter input and Export CSV button on the right of .table-header-row */
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .table-search-input {

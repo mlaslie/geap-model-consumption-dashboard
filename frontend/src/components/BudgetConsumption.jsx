@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { formatCurrency, formatTokens } from '../utils/formatters';
+import { toCsv, downloadCsv, csvTimestamp } from '../utils/csv';
 
 // Sortable column definitions — key, label, default sort direction on first click.
 const COLUMNS = [
@@ -133,6 +134,38 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
     return a._idx - b._idx;
   });
 
+  const BC_CSV_COLUMNS = [
+    { key: 'principal',        header: 'principal' },
+    { key: 'budget_type',      header: 'budget_type' },
+    { key: 'period',           header: 'period' },
+    { key: 'limit',            header: 'limit' },
+    { key: 'consumed',         header: 'consumed' },
+    { key: 'percent_of_budget',header: 'percent_of_budget' },
+    { key: 'status',           header: 'status' },
+    { key: 'is_global_default',header: 'is_global_default' },
+    { key: 'hard_limit_enabled',header: 'hard_limit_enabled' },
+  ];
+
+  const handleExport = () => {
+    if (rows.length === 0) return;
+    const csvRows = rows.map(r => {
+      const severity = statusSeverity(r.pct, r.threshold);
+      const statusLabel = severity === 2 ? 'OVER LIMIT' : severity === 1 ? 'APPROACHING' : 'OK';
+      return {
+        principal:         r.identity,
+        budget_type:       r.type,
+        period:            r.period,
+        limit:             r.limit,
+        consumed:          r.consumed,
+        percent_of_budget: r.pct,
+        status:            statusLabel,
+        is_global_default: r.isGlobalDefault,
+        hard_limit_enabled: r.hardLimitEnabled,
+      };
+    });
+    downloadCsv(`budget-consumption-${csvTimestamp()}.csv`, toCsv(BC_CSV_COLUMNS, csvRows));
+  };
+
   return (
     <div className="table-panel">
       {/* ── Page header ────────────────────────────────────────────────────── */}
@@ -173,13 +206,24 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
         <h3 style={{ fontSize: '15px', fontWeight: '600', color: 'var(--ink)' }}>
           Per-Principal Budget Status
         </h3>
-        <input
-          type="text"
-          placeholder="Filter by principal..."
-          className="table-search-input"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-        />
+        <div className="table-actions">
+          <input
+            type="text"
+            placeholder="Filter by principal..."
+            className="table-search-input"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handleExport}
+            disabled={rows.length === 0}
+            title={rows.length === 0 ? 'No rows to export' : `Export ${rows.length} rows as CSV`}
+          >
+            ⤓ Export CSV
+          </button>
+        </div>
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────────────── */}

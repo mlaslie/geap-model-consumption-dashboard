@@ -976,6 +976,265 @@ def update_model_sync_config(body: ModelSyncConfig):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+# ---------------------------------------------------------------------------
+# Cost anomaly detection — pure helper + endpoint
+# ---------------------------------------------------------------------------
+
+def _compute_cost_anomalies(
+    today_rows: list,
+    baseline_rows: list,
+    baseline_days: int,
+    threshold: float = 3.0,
+) -> dict:
+    """
+    Compute overall and per-user cost anomalies.
+
+    Parameters
+    ----------
+    today_rows     : get_user_model_totals_cached(days=1)
+    baseline_rows  : get_user_model_totals_cached(days=baseline_days+1)
+                     (covers today + the baseline window so today is subtracted out)
+    baseline_days  : number of days in the baseline window (excludes today)
+    threshold      : spike ratio that triggers an anomaly flag (default 3.0×)
+
+    A $0.01 cost floor is required to flag an anomaly so that trivially small
+    amounts (e.g. a single free-tier call that happens to be 10× a zero baseline)
+    do not generate noisy false-positive alerts.
+
+    Returns the full response data dict (excludes generated_at_utc / threshold_ratio
+    so callers can stamp those).
+    """
+    # Aggregate today cost
+    today_cost = sum(r["estimated_cost_usd"] for r in today_rows)
+
+    # Aggregate baseline: full window cost minus today cost = pure baseline days
+    baseline_window_cost = sum(r["estimated_cost_usd"] for r in baseline_rows)
+    baseline_total = max(baseline_window_cost - today_cost, 0.0)
+    baseline_daily_avg = baseline_total / baseline_days if baseline_days > 0 else 0.0
+
+    # Overall ratio / anomaly
+    if baseline_daily_avg > 0:
+        ratio = today_cost / baseline_daily_avg
+    else:
+        ratio = None
+
+    _COST_FLOOR = 0.01  # Ignore sub-cent spikes to avoid trivial false positives
+    # A zero baseline means there is NO history to divide by, so ratio is
+    # undefined — but spend appearing where there was none is exactly the case
+    # anomaly detection exists to catch (a brand-new principal or workload).
+    # It needs a higher bar than the ratio path because there is no trend to
+    # corroborate it, hence a separate, larger floor.
+    _NEW_SPEND_FLOOR = 1.00
+    is_anomaly = (
+        (
+            baseline_daily_avg > 0
+            and ratio is not None
+            and ratio >= threshold
+            and today_cost >= _COST_FLOOR
+        )
+        or (baseline_daily_avg <= 0 and today_cost >= _NEW_SPEND_FLOOR)
+    )
+    # Distinguishes the two detections for callers/UI copy.
+    anomaly_reason = (
+        None if not is_anomaly
+        else ("new_spend" if baseline_daily_avg <= 0 else "spike")
+    )
+
+    # Per-user breakdown (only users that appear in today's rows)
+    today_by_user: dict = {}
+    for r in today_rows:
+        u = r["user_email"]
+        today_by_user[u] = today_by_user.get(u, 0.0) + r["estimated_cost_usd"]
+
+    baseline_by_user: dict = {}
+    for r in baseline_rows:
+        u = r["user_email"]
+        baseline_by_user[u] = baseline_by_user.get(u, 0.0) + r["estimated_cost_usd"]
+
+    per_user = []
+    for user, u_today_cost in today_by_user.items():
+        u_baseline_window = baseline_by_user.get(user, 0.0)
+        u_baseline_total = max(u_baseline_window - u_today_cost, 0.0)
+        u_baseline_daily = u_baseline_total / baseline_days if baseline_days > 0 else 0.0
+
+        if u_baseline_daily > 0:
+            u_ratio: Optional[float] = u_today_cost / u_baseline_daily
+        else:
+            u_ratio = None
+
+        u_anomaly = (
+            (
+                u_baseline_daily > 0
+                and u_ratio is not None
+                and u_ratio >= threshold
+                and u_today_cost >= _COST_FLOOR
+            )
+            # Same new-spend rule per principal: someone with no baseline who
+            # starts spending materially today is flagged even though no ratio
+            # can be computed.
+            or (u_baseline_daily <= 0 and u_today_cost >= _NEW_SPEND_FLOOR)
+        )
+        u_reason = (
+            None if not u_anomaly
+            else ("new_spend" if u_baseline_daily <= 0 else "spike")
+        )
+        per_user.append({
+            "user_email": user,
+            "today_cost_usd": round(u_today_cost, 4),
+            "baseline_daily_avg_usd": round(u_baseline_daily, 4),
+            "ratio": round(u_ratio, 2) if u_ratio is not None else None,
+            "is_anomaly": u_anomaly,
+            "reason": u_reason,
+        })
+
+    per_user.sort(key=lambda x: x["today_cost_usd"], reverse=True)
+
+    return {
+        "baseline_days": baseline_days,
+        "threshold_ratio": threshold,
+        "today_cost_usd": round(today_cost, 4),
+        "baseline_daily_avg_usd": round(baseline_daily_avg, 4),
+        "ratio": round(ratio, 2) if ratio is not None else None,
+        "is_anomaly": is_anomaly,
+        "reason": anomaly_reason,
+        "per_user": per_user,
+    }
+
+
+@api_router.get("/cost-anomalies")
+def get_cost_anomalies(baseline_days: int = 7):
+    """
+    Detects whether today's spend is anomalously high compared to recent history.
+
+    ?baseline_days (2..90, default 7): number of past days to average as the
+    baseline.  Returns 400 if outside that range.
+
+    The baseline daily average intentionally EXCLUDES today so a big day doesn't
+    inflate the baseline and suppress its own alert.
+    """
+    try:
+        if not 2 <= baseline_days <= 90:
+            raise HTTPException(
+                status_code=400,
+                detail="baseline_days must be between 2 and 90.",
+            )
+        today_rows = get_user_model_totals_cached(days=1)
+        baseline_rows = get_user_model_totals_cached(days=baseline_days + 1)
+        data = _compute_cost_anomalies(today_rows, baseline_rows, baseline_days)
+        data["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        return {"status": "success", "data": data}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error computing cost anomalies")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ---------------------------------------------------------------------------
+# Config-health detection — pure helper + endpoint
+# ---------------------------------------------------------------------------
+
+def _compute_config_health(
+    budgets: dict,
+    logging_config: dict,
+    usage_rows: list,
+) -> dict:
+    """
+    Detect stale/misconfigured items across budgets, logging, and pricing.
+
+    unused_budgets
+        Budget rules (excluding "global_default") whose identity has ZERO usage
+        rows in the supplied 30-day window.  Useful for identifying rules that
+        were configured for users who have since stopped using the platform.
+
+    logged_unused_models
+        Models that have logging enabled (value True in logging_config) but
+        appear in NO usage rows.  These may be consuming Vertex AI quota for
+        logging that yields no data.
+
+    used_unpriced_models
+        Models that appear in usage rows whose pricing_match == "default"
+        (i.e. unpriced — every call contributes $0 to cost budgets).
+
+    unlogged_used_models
+        Models appearing in usage rows that are NOT enabled (False or absent)
+        in logging_config.  These are being called but payload logging is off,
+        so future usage detail may go untracked.
+    """
+    # Build sets of identities/models from usage
+    used_identities: set = {r["user_email"] for r in usage_rows}
+    used_models: set = {r["model_name"] for r in usage_rows}
+
+    # unused_budgets: configured (non-global_default) identities with no usage
+    unused_budgets = []
+    for identity, rule in budgets.items():
+        if identity == "global_default":
+            continue
+        if identity not in used_identities:
+            period = rule.get("period", "month") if isinstance(rule, dict) else rule.period
+            b_type = rule.get("type", "token") if isinstance(rule, dict) else rule.type
+            limit = rule.get("limit") if isinstance(rule, dict) else rule.limit
+            unused_budgets.append({
+                "identity": identity,
+                "period": period,
+                "type": b_type,
+                "limit": limit,
+            })
+    unused_budgets.sort(key=lambda x: x["identity"])
+
+    # logged_unused_models: logging=True but no usage
+    logged_unused_models = sorted(
+        model for model, enabled in logging_config.items()
+        if enabled and model not in used_models
+    )
+
+    # used_unpriced_models: models in usage with pricing_match == "default"
+    used_unpriced_models = sorted(
+        {r["model_name"] for r in usage_rows if r.get("pricing_match") == "default"}
+    )
+
+    # unlogged_used_models: models in usage not enabled in logging_config
+    unlogged_used_models = sorted(
+        model for model in used_models
+        if not logging_config.get(model, False)
+    )
+
+    return {
+        "unused_budgets": unused_budgets,
+        "logged_unused_models": logged_unused_models,
+        "used_unpriced_models": used_unpriced_models,
+        "unlogged_used_models": unlogged_used_models,
+        "usage_window_days": 30,
+    }
+
+
+@api_router.get("/config-health")
+def get_config_health():
+    """
+    Detects stale/misconfigured items across budgets, logging, and model pricing.
+
+    Uses a 30-day usage window.  Returns four lists:
+    - unused_budgets: configured non-global identities with no recent usage
+    - logged_unused_models: logging-enabled models with no recent usage
+    - used_unpriced_models: models in usage whose cost is $0 (unpriced)
+    - unlogged_used_models: models in usage with payload logging disabled
+    """
+    try:
+        from backend.logging_client import load_logging_config
+
+        budgets = load_budgets()
+        logging_config = load_logging_config()
+        usage_rows = get_user_model_totals_cached(days=30)
+        data = _compute_config_health(budgets, logging_config, usage_rows)
+        data["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        return {"status": "success", "data": data}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error computing config health")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 # Register all /api routes on the app.
 app.include_router(api_router)
 

@@ -8,6 +8,8 @@ import AlertCenter from './components/AlertCenter';
 import FinOpsAssistant from './components/FinOpsAssistant';
 import ModelLogging from './components/ModelLogging';
 import PricingPlanner from './components/PricingPlanner';
+import CostAnomalyBanner from './components/CostAnomalyBanner';
+import ConfigHealth from './components/ConfigHealth';
 import { apiFetch, setApiToken } from './utils/api';
 import { formatDateTime } from './utils/formatters';
 
@@ -46,6 +48,12 @@ export default function App() {
   // appears later in the session, the notice returns (a plain boolean would
   // hide genuinely new models behind an old dismissal).
   const [dismissedUnpricedSig, setDismissedUnpricedSig] = useState(null);
+  // Cost-anomaly and config-health data from the two new backend detectors.
+  const [costAnomaly, setCostAnomaly] = useState(null);
+  const [configHealth, setConfigHealth] = useState(null);
+  // Dismissal key for the anomaly banner: generated_at_utc + '|' + ratio.
+  // A new spike with a different ratio or generation timestamp re-surfaces the banner.
+  const [dismissedAnomalyKey, setDismissedAnomalyKey] = useState(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authTokenInput, setAuthTokenInput] = useState('');
 
@@ -211,12 +219,16 @@ export default function App() {
     setSyncState('running');
     const now = new Date().toISOString();
     try {
-      const [usageRes, budgetsRes, alertsRes, loggingRes, budgetStatusRes] = await Promise.all([
+      const [usageRes, budgetsRes, alertsRes, loggingRes, budgetStatusRes, anomalyRes, configHealthRes] = await Promise.all([
         apiFetch('/api/usage'),
         apiFetch('/api/budgets'),
         apiFetch('/api/alerts'),
         apiFetch('/api/logging-config'),
-        apiFetch('/api/budget-status')
+        apiFetch('/api/budget-status'),
+        // .catch(null): a detector outage must never reject the batch and
+        // take the primary dashboard data down with it.
+        apiFetch('/api/cost-anomalies?baseline_days=7').catch(() => null),
+        apiFetch('/api/config-health').catch(() => null),
       ]);
 
       const errors = [];
@@ -264,6 +276,31 @@ export default function App() {
         summaryParts.push(`budget-status (${Object.keys(budgetStatusData.data).length} principals)`);
       }
 
+      // Cost-anomaly and config-health: failures are silent (no error banner, no errors[]).
+      try {
+        const anomalyData = await anomalyRes.json();
+        if (anomalyRes.ok && anomalyData.status === 'success') {
+          setCostAnomaly(anomalyData.data);
+          summaryParts.push('cost-anomalies');
+        } else {
+          setCostAnomaly(null);
+        }
+      } catch {
+        setCostAnomaly(null);
+      }
+
+      try {
+        const configHealthData = await configHealthRes.json();
+        if (configHealthRes.ok && configHealthData.status === 'success') {
+          setConfigHealth(configHealthData.data);
+          summaryParts.push('config-health');
+        } else {
+          setConfigHealth(null);
+        }
+      } catch {
+        setConfigHealth(null);
+      }
+
       if (errors.length > 0) {
         setApiError(`Failed to load usage data: ${errors.join('; ')}`);
         setSyncState('error');
@@ -297,11 +334,15 @@ export default function App() {
     setSyncState('running');
     const now = new Date().toISOString();
     try {
-      const [usageRes, alertsRes, loggingRes, budgetStatusRes] = await Promise.all([
+      const [usageRes, alertsRes, loggingRes, budgetStatusRes, anomalyRes, configHealthRes] = await Promise.all([
         apiFetch('/api/usage'),
         apiFetch('/api/alerts'),
         apiFetch('/api/logging-config'),
-        apiFetch('/api/budget-status')
+        apiFetch('/api/budget-status'),
+        // .catch(null): a detector outage must never reject the batch and
+        // take the primary dashboard data down with it.
+        apiFetch('/api/cost-anomalies?baseline_days=7').catch(() => null),
+        apiFetch('/api/config-health').catch(() => null),
       ]);
 
       const errors = [];
@@ -339,6 +380,31 @@ export default function App() {
       } else if (budgetStatusData.status === 'success') {
         setBudgetStatus(budgetStatusData.data);
         summaryParts.push(`budget-status (${Object.keys(budgetStatusData.data).length} principals)`);
+      }
+
+      // Cost-anomaly and config-health: failures are silent (no error banner, no errors[]).
+      try {
+        const anomalyData = await anomalyRes.json();
+        if (anomalyRes.ok && anomalyData.status === 'success') {
+          setCostAnomaly(anomalyData.data);
+          summaryParts.push('cost-anomalies');
+        } else {
+          setCostAnomaly(null);
+        }
+      } catch {
+        setCostAnomaly(null);
+      }
+
+      try {
+        const configHealthData = await configHealthRes.json();
+        if (configHealthRes.ok && configHealthData.status === 'success') {
+          setConfigHealth(configHealthData.data);
+          summaryParts.push('config-health');
+        } else {
+          setConfigHealth(null);
+        }
+      } catch {
+        setConfigHealth(null);
       }
 
       if (errors.length > 0) {
@@ -439,6 +505,23 @@ export default function App() {
     return matchPrincipal && matchModel;
   });
   const rangeLabel = RANGE_LABELS[chartRange] || 'Last 30 days';
+
+  // Anomaly banner visibility. The key must be STABLE across refreshes:
+  // generated_at_utc changes on every request and the dashboard polls every
+  // 30s, so keying on it made a dismissal last only until the next poll.
+  // Key instead on the UTC DAY plus the set of spiking principals — the same
+  // spike stays dismissed, while a new day or a newly-spiking principal
+  // re-surfaces the banner.
+  const anomalyKey = costAnomaly && costAnomaly.is_anomaly
+    ? `${(costAnomaly.generated_at_utc || '').slice(0, 10)}|${
+        (costAnomaly.per_user || [])
+          .filter(u => u.is_anomaly)
+          .map(u => u.user_email)
+          .sort()
+          .join(',') || 'fleet'
+      }`
+    : null;
+  const showAnomalyBanner = anomalyKey !== null && dismissedAnomalyKey !== anomalyKey;
 
   const themeOptions = [
     { value: 'light',  label: '☀ Light' },
@@ -836,7 +919,7 @@ export default function App() {
                   display: 'flex',
                   gap: '16px',
                   alignItems: 'center',
-                  marginBottom: (truncated || (unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|'))) ? '8px' : '20px',
+                  marginBottom: (truncated || (unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|')) || showAnomalyBanner) ? '8px' : '20px',
                   padding: '14px 18px',
                   flexWrap: 'wrap'
                 }}>
@@ -890,7 +973,7 @@ export default function App() {
                 {/* Truncation warning */}
                 {truncated && (
                   <div style={{
-                    marginBottom: unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|') ? '8px' : '20px',
+                    marginBottom: (unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|')) || showAnomalyBanner ? '8px' : '20px',
                     padding: '8px 14px',
                     borderRadius: 'var(--radius)',
                     background: 'var(--status-warn-bg)',
@@ -906,7 +989,7 @@ export default function App() {
                 {/* Unpriced models notice */}
                 {unpricedModels.length > 0 && dismissedUnpricedSig !== unpricedModels.join('|') && (
                   <div style={{
-                    marginBottom: '20px',
+                    marginBottom: showAnomalyBanner ? '8px' : '20px',
                     padding: '8px 14px',
                     borderRadius: 'var(--radius)',
                     background: 'var(--status-warn-bg)',
@@ -944,6 +1027,12 @@ export default function App() {
                   </div>
                 )}
 
+                {showAnomalyBanner && (
+                  <CostAnomalyBanner
+                    anomaly={costAnomaly}
+                    onDismiss={() => setDismissedAnomalyKey(anomalyKey)}
+                  />
+                )}
                 <SummaryCards logs={dashboardRows} alerts={alerts} rangeLabel={rangeLabel} />
                 <UsageCharts
                   logs={dashboardRows}
@@ -954,6 +1043,7 @@ export default function App() {
                   chartTruncated={chartTruncated}
                 />
                 <UserTable logs={dashboardRows} budgets={budgets} budgetStatus={budgetStatus} rangeLabel={rangeLabel} />
+                <ConfigHealth health={configHealth} onNavigate={setActiveTab} />
               </div>
             )}
 
