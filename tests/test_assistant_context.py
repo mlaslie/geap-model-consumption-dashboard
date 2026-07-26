@@ -152,3 +152,65 @@ def test_per_user_budget_block_still_uses_budget_period(monkeypatch, captured_pr
     entry = payload["per_user_consumption_and_budgets"]["dave@example.com"]
     assert entry["tokens_consumed"] == 900_000  # month period, not the 24h window
     assert entry["actual_consumption_percentage_of_budget"] == "90.0%"
+
+
+def test_windows_include_per_model_and_per_region(monkeypatch, captured_prompt):
+    """'which models/regions in the last 24h' must be answerable from window data."""
+    def fake_totals(days):
+        if days == 1:
+            return [
+                _row("a@x.com", model="gemini-3.6-flash", tokens=100),
+                _row("b@x.com", model="gemini-2.5-pro", tokens=300),
+            ]
+        return [_row("c@x.com", model="gemini-2.5-flash", tokens=999)]
+
+    monkeypatch.setattr(ai, "get_user_model_totals_cached", fake_totals)
+    monkeypatch.setattr(ai, "load_budgets", lambda: {})
+
+    ai.query_finops_assistant([{"role": "user", "content": "models and regions last 24h?"}])
+    payload = json.loads(re.search(r"\{.*\n\}", captured_prompt["system_prompt"], re.S).group(0))
+
+    w24 = payload["usage_by_window"]["last_24_hours"]
+    assert set(w24["per_model"]) == {"gemini-3.6-flash", "gemini-2.5-pro"}
+    assert w24["per_model"]["gemini-2.5-pro"]["tokens"] == 300
+    assert w24["per_region"]["global"]["tokens"] == 400
+    # 30-day window keeps its own, different model set
+    assert set(payload["usage_by_window"]["last_30_days"]["per_model"]) == {"gemini-2.5-flash"}
+
+
+def test_truncated_reply_is_flagged(monkeypatch):
+    """A MAX_TOKENS finish must append a notice, not present a cut-off answer."""
+    class _R:
+        text = "Models used: gemini-3.6-flash and"
+        candidates = [type("C", (), {"finish_reason": "MAX_TOKENS"})()]
+
+    class _FakeModels:
+        def generate_content(self, model, contents, config):
+            return _R()
+
+    monkeypatch.setattr(ai, "_SDK_AVAILABLE", True)
+    monkeypatch.setattr(ai.settings, "BIGQUERY_PROJECT_ID", "test-project")
+    monkeypatch.setattr(ai, "genai", type("g", (), {
+        "Client": lambda **kw: type("c", (), {"models": _FakeModels()})()
+    }))
+    monkeypatch.setattr(ai, "types", type("t", (), {
+        "Content": lambda role, parts: {"role": role, "parts": parts},
+        "Part": type("P", (), {"from_text": staticmethod(lambda text: text)}),
+        "GenerateContentConfig": lambda **kw: type("C", (), kw)(),
+    }))
+    monkeypatch.setattr(ai, "get_user_model_totals_cached", lambda days: [])
+    monkeypatch.setattr(ai, "load_budgets", lambda: {})
+
+    out = ai.query_finops_assistant([{"role": "user", "content": "long question"}])
+    assert "cut off at the response length limit" in out
+
+
+def test_normal_reply_has_no_truncation_notice(monkeypatch, captured_prompt):
+    monkeypatch.setattr(ai, "get_user_model_totals_cached", lambda days: [])
+    monkeypatch.setattr(ai, "load_budgets", lambda: {})
+    out = ai.query_finops_assistant([{"role": "user", "content": "hi"}])
+    assert "cut off" not in out
+
+
+def test_output_cap_is_generous_enough_for_multipart_answers():
+    assert ai.ASSISTANT_MAX_OUTPUT_TOKENS >= 2048

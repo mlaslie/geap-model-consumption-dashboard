@@ -33,18 +33,36 @@ STANDARD_WINDOWS: Dict[str, int] = {
     "last_30_days": 30,
 }
 
+# Output ceiling for one assistant reply. Multi-part questions ("which models
+# AND which regions, in the last 24 hours") need room for several sections;
+# the previous 800-token cap cut answers off mid-sentence.
+ASSISTANT_MAX_OUTPUT_TOKENS = 4096
+
+
+def _aggregate_by(rows: List[Dict[str, Any]], key: str) -> Dict[str, Dict[str, Any]]:
+    """Sums per-(user, model, tier, region) rows by any single dimension."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        k = row.get(key) or "unknown"
+        if k not in out:
+            out[k] = {"tokens": 0, "cost": 0.0, "calls": 0}
+        out[k]["tokens"] += row["total_tokens"]
+        out[k]["cost"] += row["estimated_cost_usd"]
+        out[k]["calls"] += row["call_count"]
+    return out
+
 
 def _aggregate_users(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Sums per-(user, model, tier, region) rows into per-user totals."""
-    users: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        u = row["user_email"]
-        if u not in users:
-            users[u] = {"tokens": 0, "cost": 0.0, "calls": 0}
-        users[u]["tokens"] += row["total_tokens"]
-        users[u]["cost"] += row["estimated_cost_usd"]
-        users[u]["calls"] += row["call_count"]
-    return users
+    return _aggregate_by(rows, "user_email")
+
+
+def _fmt_breakdown(agg: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Token-sorted, rounded view of an aggregation for prompt injection."""
+    return {
+        k: {"tokens": m["tokens"], "cost_usd": round(m["cost"], 4), "calls": m["calls"]}
+        for k, m in sorted(agg.items(), key=lambda kv: kv[1]["tokens"], reverse=True)
+    }
 
 
 def query_finops_assistant(messages: List[Dict[str, str]]) -> str:
@@ -127,23 +145,20 @@ def query_finops_assistant(messages: List[Dict[str, str]]) -> str:
     #    "no usage" instead of borrowing another window's numbers.
     usage_by_window: Dict[str, Any] = {}
     for label, days in STANDARD_WINDOWS.items():
-        per_user = _aggregate_users(rows_for(days))
+        window_rows = rows_for(days)
+        per_user = _aggregate_users(window_rows)
         usage_by_window[label] = {
             "window_days": days,
             "total_tokens": sum(u["tokens"] for u in per_user.values()),
             "total_cost_usd": round(sum(u["cost"] for u in per_user.values()), 4),
             "total_calls": sum(u["calls"] for u in per_user.values()),
             "active_users": len(per_user),
-            "per_user": {
-                u: {
-                    "tokens": m["tokens"],
-                    "cost_usd": round(m["cost"], 4),
-                    "calls": m["calls"],
-                }
-                for u, m in sorted(
-                    per_user.items(), key=lambda kv: kv[1]["tokens"], reverse=True
-                )
-            },
+            "per_user": _fmt_breakdown(per_user),
+            # Per-model and per-region within the SAME window, so questions like
+            # "which models/regions were used in the last 24 hours" are answered
+            # from window data rather than the 30-day model table.
+            "per_model": _fmt_breakdown(_aggregate_by(window_rows, "model_name")),
+            "per_region": _fmt_breakdown(_aggregate_by(window_rows, "region")),
         }
 
     now_utc = datetime.now(timezone.utc)
@@ -290,11 +305,15 @@ Guidelines:
                 parts=[types.Part.from_text(text=msg["content"])]
             ))
 
-        # Request generation
+        # Request generation.
+        # max_output_tokens was 800 (~600 words), which silently truncated
+        # multi-part answers mid-sentence (e.g. "models AND regions used").
+        # Raised well clear of a full breakdown; cost impact is negligible
+        # because output is only billed for what is actually generated.
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0.2,
-            max_output_tokens=800
+            max_output_tokens=ASSISTANT_MAX_OUTPUT_TOKENS
         )
 
         response = client.models.generate_content(
@@ -302,7 +321,23 @@ Guidelines:
             contents=contents,
             config=config
         )
-        return response.text
+        text = response.text or ""
+
+        # If the model still hit the ceiling, say so rather than presenting a
+        # sentence that simply stops. Defensive: SDK shapes vary, so any
+        # failure to read the finish reason just skips the notice.
+        try:
+            finish = str(getattr(response.candidates[0], "finish_reason", "") or "")
+            if "MAX_TOKENS" in finish.upper():
+                logger.warning("Assistant reply hit max_output_tokens; answer truncated.")
+                text += (
+                    "\n\n_⚠️ This answer was cut off at the response length limit. "
+                    "Ask for a specific part (e.g. just the regions) for the rest._"
+                )
+        except Exception:  # noqa: BLE001 — never fail a good answer over metadata
+            pass
+
+        return text
 
     except Exception as e:
         logger.exception("Vertex AI SDK generation error: %s", e)
