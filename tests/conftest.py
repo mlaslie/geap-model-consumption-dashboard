@@ -19,12 +19,14 @@ import backend.main
 
 @pytest.fixture(autouse=True)
 def clear_usage_cache():
-    """Clear both TTL caches in backend.bq_client before and after every test."""
+    """Clear all TTL caches in backend.bq_client before and after every test."""
     backend.bq_client._usage_cache.clear()
     backend.bq_client._totals_cache.clear()
+    backend.bq_client._range_cache.clear()
     yield
     backend.bq_client._usage_cache.clear()
     backend.bq_client._totals_cache.clear()
+    backend.bq_client._range_cache.clear()
 
 
 @pytest.fixture(autouse=True)

@@ -126,11 +126,26 @@ payload_tokens AS (
       SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.prompt_token_count') AS INT64),
       0
     ) AS input_tokens,
+    -- BILLABLE OUTPUT = visible candidate tokens + reasoning ("thoughts")
+    -- tokens. Thinking models emit thoughtsTokenCount separately from
+    -- candidatesTokenCount, but Google bills BOTH at the output rate. Counting
+    -- only candidates understated output by ~26% on observed traffic, and left
+    -- input + output != totalTokenCount (the arithmetic tell).
     COALESCE(
       SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.candidatesTokenCount') AS INT64),
       SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.candidates_token_count') AS INT64),
       0
+    ) + COALESCE(
+      SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
+      SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.thoughts_token_count') AS INT64),
+      0
     ) AS output_tokens,
+    -- Surfaced separately so the UI can show how much output is reasoning.
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
+      SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.thoughts_token_count') AS INT64),
+      0
+    ) AS thoughts_tokens,
     COALESCE(
       SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.totalTokenCount') AS INT64),
       SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.total_token_count') AS INT64),
@@ -208,6 +223,7 @@ SELECT
   P.model_name,
   SUM(P.input_tokens) AS input_tokens,
   SUM(P.output_tokens) AS output_tokens,
+  SUM(P.thoughts_tokens) AS thoughts_tokens,
   SUM(P.total_tokens) AS total_tokens,
   MAX(P.logging_time) AS call_timestamp,
   '{PROJECT_ID}' AS project_id,
@@ -237,11 +253,21 @@ SELECT
     SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.prompt_token_count') AS INT64),
     0
   )) AS input_tokens,
+  -- Billable output includes reasoning tokens (see the full view's note).
   SUM(COALESCE(
     SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.candidatesTokenCount') AS INT64),
     SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.candidates_token_count') AS INT64),
     0
+  ) + COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
+    SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.thoughts_token_count') AS INT64),
+    0
   )) AS output_tokens,
+  SUM(COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
+    SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.thoughts_token_count') AS INT64),
+    0
+  )) AS thoughts_tokens,
   SUM(COALESCE(
     SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.totalTokenCount') AS INT64),
     SAFE_CAST(JSON_VALUE(full_response, '$.usage_metadata.total_token_count') AS INT64),

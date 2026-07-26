@@ -33,6 +33,13 @@ _usage_cache: Dict[Optional[int], tuple] = {}
 # ---------------------------------------------------------------------------
 _totals_cache: Dict[int, tuple] = {}
 
+# ---------------------------------------------------------------------------
+# TTL cache for get_user_model_totals_range — keyed by (start_date, end_date)
+# Kept separate from _totals_cache so range queries and rolling-day queries
+# never share or evict each other's entries.
+# ---------------------------------------------------------------------------
+_range_cache: Dict[tuple, tuple] = {}
+
 
 def _validate_identifier(value: str, name: str) -> None:
     """Validate that a BigQuery identifier component is safe to interpolate into SQL."""
@@ -161,9 +168,14 @@ def normalize_model_name(model_name: str) -> str:
     if not model_name:
         return "unknown"
     model_name = model_name.lower()
-    if "publishers/google/models/" in model_name:
-        model_name = model_name.replace("publishers/google/models/", "")
-    return model_name
+    # Take the trailing path segment, which handles every prefix form the API
+    # emits ("publishers/google/models/x", a bare "models/x", or a fully
+    # qualified "projects/../locations/../publishers/google/models/x").
+    # Matches the view's own REGEXP_EXTRACT(model, r'([^/]+)$') so pricing
+    # lookups cannot silently miss and report a real model as unpriced.
+    if "/" in model_name:
+        model_name = model_name.rsplit("/", 1)[-1]
+    return model_name or "unknown"
 
 
 def resolve_pricing(
@@ -275,6 +287,7 @@ def reload_pricing() -> Dict:
     PRICING.update(new_pricing)
     _usage_cache.clear()
     _totals_cache.clear()
+    _range_cache.clear()
     return dict(PRICING)
 
 
@@ -324,6 +337,7 @@ def get_token_usage_logs(days: int | None = None) -> List[Dict[str, Any]]:
             model_name,
             input_tokens,
             output_tokens,
+            thoughts_tokens,
             total_tokens,
             call_count,
             pricing_tier,
@@ -363,6 +377,9 @@ def get_token_usage_logs(days: int | None = None) -> List[Dict[str, Any]]:
             "model_name": normalize_model_name(row.model_name),
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
+            # Reasoning tokens, already INCLUDED in output_tokens (Google bills
+            # them at output rates); surfaced so the UI can show the split.
+            "thoughts_tokens": getattr(row, "thoughts_tokens", 0) or 0,
             "total_tokens": row.total_tokens,
             "call_count": row.call_count,
             "pricing_tier": row.pricing_tier,
@@ -418,6 +435,7 @@ def get_user_model_totals(days: int) -> List[Dict[str, Any]]:
             region,
             SUM(input_tokens)  AS input_tokens,
             SUM(output_tokens) AS output_tokens,
+            SUM(thoughts_tokens) AS thoughts_tokens,
             SUM(total_tokens)  AS total_tokens,
             SUM(call_count)    AS call_count
         FROM `{project_id}.{dataset}.{view}`
@@ -449,6 +467,9 @@ def get_user_model_totals(days: int) -> List[Dict[str, Any]]:
             "region": row.region,
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
+            # Reasoning tokens, already INCLUDED in output_tokens (Google bills
+            # them at output rates); surfaced so the UI can show the split.
+            "thoughts_tokens": getattr(row, "thoughts_tokens", 0) or 0,
             "total_tokens": row.total_tokens,
             "call_count": row.call_count,
             "estimated_cost_usd": cost,
@@ -475,6 +496,113 @@ def get_user_model_totals_cached(days: int) -> List[Dict[str, Any]]:
 
     data = get_user_model_totals(days=days)
     _totals_cache[days] = (now, data)
+    return data
+
+
+def get_user_model_totals_range(start_date: str, end_date: str) -> List[Dict[str, Any]]:
+    """
+    Returns SQL-side aggregated totals per (user_email, model_name, pricing_tier, region)
+    for the half-open calendar range [start_date, end_date).
+
+    Date bounds are passed exclusively as ScalarQueryParameters — the raw date
+    strings are NEVER f-string-interpolated into the query body.  Only structural
+    identifiers (project, dataset, view) touch the query string, and those are
+    validated by _validate_identifier() before interpolation, matching the
+    pattern used throughout this module.
+
+    thoughts_tokens is carried through exactly as in get_user_model_totals so
+    callers that aggregate across models see the complete reasoning-token split.
+    """
+    from google.cloud import bigquery
+
+    project_id = settings.BIGQUERY_PROJECT_ID
+    if not project_id:
+        raise ValueError(
+            "GCP Project ID is not configured. Please set BIGQUERY_PROJECT_ID in the environment."
+        )
+
+    dataset = settings.BIGQUERY_DATASET
+    view = settings.BIGQUERY_VIEW
+
+    _validate_identifier(project_id, "BIGQUERY_PROJECT_ID")
+    _validate_identifier(dataset, "BIGQUERY_DATASET")
+    _validate_identifier(view, "BIGQUERY_VIEW")
+
+    query = f"""
+        SELECT
+            user_email,
+            model_name,
+            pricing_tier,
+            region,
+            SUM(input_tokens)    AS input_tokens,
+            SUM(output_tokens)   AS output_tokens,
+            SUM(thoughts_tokens) AS thoughts_tokens,
+            SUM(total_tokens)    AS total_tokens,
+            SUM(call_count)      AS call_count
+        FROM `{project_id}.{dataset}.{view}`
+        WHERE call_timestamp >= TIMESTAMP(@start_date)
+          AND call_timestamp < TIMESTAMP(@end_date)
+        GROUP BY user_email, model_name, pricing_tier, region
+    """
+    query_params = [
+        bigquery.ScalarQueryParameter("start_date", "STRING", start_date),
+        bigquery.ScalarQueryParameter("end_date", "STRING", end_date),
+    ]
+    job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+
+    client = bigquery.Client(project=project_id)
+    query_job = client.query(query, job_config=job_config)
+    results = query_job.result()
+
+    rows = []
+    for row in results:
+        _, match_kind = resolve_pricing(row.model_name, PRICING)
+        cost = calculate_estimated_cost(
+            row.model_name,
+            row.input_tokens,
+            row.output_tokens,
+            PRICING,
+            tier=row.pricing_tier,
+            region=row.region,
+        )
+        rows.append({
+            "user_email": row.user_email,
+            "model_name": normalize_model_name(row.model_name),
+            "pricing_tier": row.pricing_tier,
+            "region": row.region,
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            # Reasoning tokens, already INCLUDED in output_tokens (billed at
+            # output rates); carried through so statement aggregations expose
+            # the full input/output/thoughts split.
+            "thoughts_tokens": getattr(row, "thoughts_tokens", 0) or 0,
+            "total_tokens": row.total_tokens,
+            "call_count": row.call_count,
+            "estimated_cost_usd": cost,
+            "pricing_match": match_kind,
+        })
+    return rows
+
+
+def get_user_model_totals_range_cached(start_date: str, end_date: str) -> List[Dict[str, Any]]:
+    """
+    Cached wrapper around get_user_model_totals_range.
+
+    Results are keyed by (start_date, end_date) in _range_cache — a dict
+    completely separate from _totals_cache so range queries and rolling-day
+    queries never share keys or evict each other's entries.  Cached for
+    _CACHE_TTL seconds (same TTL as the other caches).
+    """
+    now = time.monotonic()
+    key = (start_date, end_date)
+    entry = _range_cache.get(key)
+    if entry is not None:
+        ts, data = entry
+        if now - ts < _CACHE_TTL:
+            return data
+
+    data = get_user_model_totals_range(start_date, end_date)
+    _range_cache[key] = (now, data)
     return data
 
 

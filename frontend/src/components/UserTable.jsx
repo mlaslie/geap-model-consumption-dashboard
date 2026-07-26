@@ -45,6 +45,7 @@ export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'L
         calls: 0,
         inputTokens: 0,
         outputTokens: 0,
+        thoughtsTokens: 0,
         totalTokens: 0,
         cost: 0.0,
         hasDefaultPricing: false,
@@ -57,6 +58,8 @@ export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'L
     row.calls += (log.call_count != null ? log.call_count : 1);
     row.inputTokens += log.input_tokens || 0;
     row.outputTokens += log.output_tokens || 0;
+    // thoughts_tokens is already included in output_tokens — track separately for display only
+    row.thoughtsTokens += log.thoughts_tokens || 0;
     row.totalTokens += log.total_tokens || 0;
     row.cost += log.estimated_cost_usd || 0;
     if (log.pricing_match === 'default') {
@@ -170,6 +173,7 @@ export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'L
     { key: 'calls',           header: 'calls' },
     { key: 'input_tokens',    header: 'input_tokens' },
     { key: 'output_tokens',   header: 'output_tokens' },
+    { key: 'thoughts_tokens', header: 'thoughts_tokens' },
     { key: 'total_tokens',    header: 'total_tokens' },
     { key: 'cost_usd',        header: 'cost_usd' },
     { key: 'pricing_status',  header: 'pricing_status' },
@@ -189,6 +193,7 @@ export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'L
         calls:           r.calls,
         input_tokens:    r.inputTokens,
         output_tokens:   r.outputTokens,
+        thoughts_tokens: r.thoughtsTokens,
         total_tokens:    r.totalTokens,
         cost_usd:        unpriced ? null : r.cost,
         pricing_status:  unpriced ? 'unpriced' : 'priced',
@@ -297,6 +302,14 @@ export default function UserTable({ logs, budgets, budgetStatus, rangeLabel = 'L
                       <span style={{color: 'var(--text-secondary)'}}>{formatTokens(r.inputTokens)}</span>
                       <span style={{color: 'var(--text-muted)'}}> / </span>
                       <span style={{color: 'var(--text-muted)'}}>{formatTokens(r.outputTokens)}</span>
+                      {r.thoughtsTokens > 0 && (
+                        <span
+                          style={{ color: 'var(--ink-3)', fontSize: '11px' }}
+                          title="Reasoning tokens are billed at output rates and are included in the output count."
+                        >
+                          {' '}({formatTokens(r.thoughtsTokens)} reasoning)
+                        </span>
+                      )}
                     </td>
                     <td
                       style={{

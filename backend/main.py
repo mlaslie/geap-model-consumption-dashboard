@@ -1,3 +1,4 @@
+import calendar
 import collections
 import json
 import os
@@ -7,7 +8,7 @@ import threading
 import time
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
@@ -82,6 +83,102 @@ def _fetch_period_user_totals(budgets: Dict) -> Dict[str, Dict[str, Dict[str, fl
             user_totals[user]["cost"] += cost
         period_user_totals[period] = user_totals
     return period_user_totals
+
+
+# ---------------------------------------------------------------------------
+# Burn-rate helper — pure, stateless, fully unit-testable.
+# ---------------------------------------------------------------------------
+
+def _compute_burn(
+    consumed: float,
+    limit: float,
+    recent_window_cost_or_tokens: float,
+    burn_window_days: int,
+    period_days: int,
+) -> dict:
+    """
+    Compute burn-rate projection metrics for a single budget identity.
+
+    This app uses a **trailing-window** budget model, not a calendar-aligned one.
+    Consequently ``days_remaining`` is treated as ``period_days`` (a full window
+    ahead) rather than "calendar days left in the month".  The metric answers:
+    "at the current rate, how long until the budget limit is reached?"
+
+    Parameters
+    ----------
+    consumed
+        Already-consumed value in the budget's own unit (cost USD for 'money'
+        budgets, tokens for 'token' budgets).
+    limit
+        Budget limit in the same unit.
+    recent_window_cost_or_tokens
+        Total value accumulated over the burn window (``burn_window_days`` days).
+    burn_window_days
+        Length of the recent window in days.  Caller must pass
+        ``min(7, PERIOD_DAYS[period])`` to avoid projecting a daily budget from
+        a 7-day average.
+    period_days
+        Full period length (``PERIOD_DAYS[period]``), used as ``days_remaining``
+        under the trailing-window model.
+
+    Returns
+    -------
+    dict with keys:
+        recent_daily_burn    (float)  — average daily value over the burn window
+        burn_window_days     (int)    — echoes the input parameter
+        days_to_breach       (float | None) — headroom / burn; 0 if already breached;
+                                              None when burn ≤ 0 OR when the rate is
+                                              sustainable (steady state ≤ limit, so a
+                                              trailing window never breaches)
+        projected_period_pct (float | None) — steady-state % of limit if the current
+                                              rate persists for a full period;
+                                              None when burn ≤ 0 or limit ≤ 0
+    """
+    recent_daily_burn: float = (
+        recent_window_cost_or_tokens / burn_window_days
+        if burn_window_days > 0
+        else 0.0
+    )
+
+    # Steady state of a TRAILING window: if the current daily rate persists,
+    # the window converges to (rate x period_days) — older days roll off the
+    # back as new ones are added. This is the correct projection target.
+    steady_state_period_total = recent_daily_burn * period_days
+
+    # projected_period_pct — the steady state IS the projection. Adding it to
+    # `consumed` (as an earlier version did) double-counts, because `consumed`
+    # is itself already a full trailing period of spend: a user burning at a
+    # perfectly steady rate would have shown 200% of their true projection.
+    if recent_daily_burn <= 0.0 or limit <= 0.0:
+        projected_period_pct: Optional[float] = None
+    else:
+        projected_period_pct = round((steady_state_period_total / limit) * 100.0, 1)
+
+    # days_to_breach
+    if consumed >= limit:
+        days_to_breach: Optional[float] = 0.0
+    elif recent_daily_burn <= 0.0:
+        days_to_breach = None
+    elif limit > 0.0 and steady_state_period_total <= limit:
+        # Sustainable: in a trailing window, spend rolls off at the same rate it
+        # accrues, so a rate whose steady state sits under the limit will NEVER
+        # breach. Reporting "headroom / burn" here would raise a false alarm
+        # (e.g. $5/day against a $300/30-day budget converges to $150, yet the
+        # naive formula would predict a breach in 40 days).
+        days_to_breach = None
+    else:
+        headroom = limit - consumed
+        raw = headroom / recent_daily_burn
+        # Clamp negative headroom (defensive; shouldn't occur after the
+        # consumed >= limit guard above, but protects against float drift).
+        days_to_breach = round(max(raw, 0.0), 1)
+
+    return {
+        "recent_daily_burn": recent_daily_burn,
+        "burn_window_days": burn_window_days,
+        "days_to_breach": days_to_breach,
+        "projected_period_pct": projected_period_pct,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -537,14 +634,90 @@ def get_budget_status():
 
     Response shape per identity:
       {consumed, limit, type, period, percentage, threshold_percentage,
-       hard_limit_enabled, is_global_default}
+       hard_limit_enabled, is_global_default,
+       recent_daily_burn, burn_window_days, days_to_breach, projected_period_pct}
+
+    Burn-rate fields (Feature 1):
+      recent_daily_burn    — average daily consumption over a short recent window,
+                             in the budget's own unit (cost for 'money', tokens for
+                             'token').
+      burn_window_days     — window used: min(7, PERIOD_DAYS[period]).  A daily
+                             budget uses a 1-day window to avoid nonsensical 7-day
+                             averages.
+      days_to_breach       — headroom / burn_rate rounded to 1 d.p.; null when burn
+                             ≤ 0; 0 when already at or over limit.
+      projected_period_pct — projected % of limit at end of full period at the
+                             current burn rate; null when burn ≤ 0 or limit ≤ 0.
+
+    NOTE — trailing-window model: days_remaining is treated as PERIOD_DAYS[period]
+    (a full window ahead), not as calendar days remaining in the current period.
+    The budget enforcement in this app is trailing-window based, so the projection
+    answers "at the current rate, how long until the limit is hit?" rather than a
+    calendar-period end-of-month forecast.
     """
     try:
         budgets = load_budgets()
-        period_user_totals = _fetch_period_user_totals(budgets)
 
         global_default = budgets.get("global_default")
         result: Dict[str, Any] = {}
+
+        # ------------------------------------------------------------------
+        # Determine which periods and burn windows are needed, then fetch
+        # each distinct days value EXACTLY ONCE so tests can assert that
+        # the same days integer is never passed to get_user_model_totals_cached
+        # more than once.
+        #
+        # burn_window = min(7, PERIOD_DAYS[period])
+        # For "day" (1 day) the burn window equals the period window — so
+        # the single fetch serves both purposes.
+        # ------------------------------------------------------------------
+        period_to_days: Dict[str, int] = {}
+        period_to_bw: Dict[str, int] = {}
+        fetch_days: set = set()
+
+        for rule in budgets.values():
+            period = rule.get("period", "month") if isinstance(rule, dict) else rule.period
+            if period in PERIOD_DAYS:
+                p_days = PERIOD_DAYS[period]
+                bw = min(7, p_days)
+                period_to_days[period] = p_days
+                period_to_bw[period] = bw
+                fetch_days.add(p_days)
+                fetch_days.add(bw)
+
+        # Single pass — one call per distinct days value.
+        all_fetched: Dict[int, List] = {
+            d: get_user_model_totals_cached(days=d) for d in fetch_days
+        }
+
+        # Aggregate period totals (tokens + cost) per (period, user).
+        period_user_totals: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for period, p_days in period_to_days.items():
+            rows = all_fetched[p_days]
+            user_totals: Dict[str, Dict[str, float]] = {}
+            for row in rows:
+                u = row["user_email"]
+                if u not in user_totals:
+                    user_totals[u] = {"tokens": 0.0, "cost": 0.0}
+                user_totals[u]["tokens"] += row["total_tokens"]
+                user_totals[u]["cost"] += row["estimated_cost_usd"]
+            period_user_totals[period] = user_totals
+
+        # Aggregate burn-window totals per (burn_window_days, user).
+        # {burn_window_days: {user_email: {tokens: float, cost: float}}}
+        burn_window_user_totals: Dict[int, Dict[str, Dict[str, float]]] = {}
+        for period, bw in period_to_bw.items():
+            if bw in burn_window_user_totals:
+                continue
+            rows = all_fetched[bw]
+            bw_by_user: Dict[str, Dict[str, float]] = {}
+            for row in rows:
+                u = row["user_email"]
+                if u not in bw_by_user:
+                    bw_by_user[u] = {"tokens": 0.0, "cost": 0.0}
+                bw_by_user[u]["tokens"] += row["total_tokens"]
+                bw_by_user[u]["cost"] += row["estimated_cost_usd"]
+            burn_window_user_totals[bw] = bw_by_user
 
         # Collect all users seen across all period windows.
         all_seen_users: set = set()
@@ -621,11 +794,286 @@ def get_budget_status():
                 "is_global_default": False,
             }
 
+        # ------------------------------------------------------------------
+        # Attach burn-rate metrics to every entry.
+        # ------------------------------------------------------------------
+        for user, entry in result.items():
+            period = entry["period"]
+            b_type = entry["type"]
+            limit = entry["limit"]
+            bw = min(7, PERIOD_DAYS.get(period, 30))
+            bw_user = burn_window_user_totals.get(bw, {}).get(
+                user, {"tokens": 0.0, "cost": 0.0}
+            )
+            recent_window_value = (
+                bw_user["cost"] if b_type == "money" else bw_user["tokens"]
+            )
+            burn = _compute_burn(
+                consumed=entry["consumed"],
+                limit=limit,
+                recent_window_cost_or_tokens=recent_window_value,
+                burn_window_days=bw,
+                period_days=PERIOD_DAYS.get(period, 30),
+            )
+            entry.update(burn)
+
         return {"status": "success", "data": result}
     except HTTPException:
         raise
     except Exception:
         logger.exception("Error computing budget status")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# Compiled once at module load — used by get_statements for fast validation.
+_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+@api_router.get("/statements")
+def get_statements(month: str = ""):
+    """
+    Calendar-month usage statement for the requested month.
+
+    ?month=YYYY-MM (required).
+
+    Validation:
+    - Strict regex ^\\d{4}-(0[1-9]|1[0-2])$ → 400 on mismatch.
+    - Rejects months more than 10 years in the past → 400.
+    - Rejects any month strictly in the future (beyond the current calendar month)
+      → 400.
+
+    Month arithmetic uses datetime + calendar.monthrange so year boundaries
+    (December → January) are handled correctly without manual string math.
+
+    Response shape:
+      {status, data: {
+        month, period_start, period_end_exclusive, generated_at_utc,
+        totals: {cost_usd, input_tokens, output_tokens, thoughts_tokens,
+                 total_tokens, calls, principals},
+        per_principal: [{user_email, cost_usd, input_tokens, output_tokens,
+                         thoughts_tokens, total_tokens, calls,
+                         models:[sorted]}] sorted by cost desc,
+        per_model: [{model_name, cost_usd, input_tokens, output_tokens,
+                     thoughts_tokens, total_tokens, calls}] sorted by cost desc,
+        pricing_assumptions: {rates_as_of_utc, note, models},
+        unpriced_models: [model ids with pricing_match=='default'],
+        budget_snapshot: [{identity, period, type, limit}]
+      }}
+
+    pricing_assumptions.note explains that rates are applied as-of generation
+    time: the portal does not yet store effective-dated rates, so regenerating
+    a statement after a pricing change produces different cost figures.
+    """
+    if not _MONTH_RE.match(month):
+        raise HTTPException(
+            status_code=400,
+            detail="month must be in YYYY-MM format (e.g. 2026-07).",
+        )
+
+    try:
+        year = int(month[:4])
+        mon = int(month[5:7])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid month value.")
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Reject future months (strictly beyond the current calendar month).
+    if (year, mon) > (now_utc.year, now_utc.month):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot request a statement for a future month.",
+        )
+
+    # Reject months more than 10 years in the past.
+    # Comparison is month-granular: (year, mon) < (now.year-10, now.month).
+    if (year, mon) < (now_utc.year - 10, now_utc.month):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot request a statement more than 10 years in the past.",
+        )
+
+    # Month arithmetic via datetime + calendar — correct across year boundaries.
+    _, days_in_month = calendar.monthrange(year, mon)
+    period_start_dt = date(year, mon, 1)
+    period_end_dt = period_start_dt + timedelta(days=days_in_month)  # first day of next month
+
+    period_start = period_start_dt.isoformat()
+    period_end_exclusive = period_end_dt.isoformat()
+
+    try:
+        rows = bq_client.get_user_model_totals_range_cached(period_start, period_end_exclusive)
+        budgets = load_budgets()
+
+        generated_at_utc = datetime.now(timezone.utc).isoformat()
+
+        # ------------------------------------------------------------------
+        # Aggregate raw rows into totals / per-principal / per-model buckets.
+        # thoughts_tokens is carried through all aggregations; it is already
+        # counted inside output_tokens (Google bills it at output rates).
+        # ------------------------------------------------------------------
+        total_cost = 0.0
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thoughts_tokens = 0
+        total_tokens = 0
+        total_calls = 0
+
+        principal_data: Dict[str, dict] = {}
+        model_data: Dict[str, dict] = {}
+        unpriced_models: set = set()
+
+        for row in rows:
+            user = row["user_email"]
+            model = row["model_name"]
+            cost = row["estimated_cost_usd"]
+            in_tok = row["input_tokens"]
+            out_tok = row["output_tokens"]
+            th_tok = row.get("thoughts_tokens", 0) or 0
+            tot_tok = row["total_tokens"]
+            calls = row["call_count"]
+
+            total_cost += cost
+            total_input_tokens += in_tok
+            total_output_tokens += out_tok
+            total_thoughts_tokens += th_tok
+            total_tokens += tot_tok
+            total_calls += calls
+
+            if row.get("pricing_match") == "default":
+                unpriced_models.add(model)
+
+            if user not in principal_data:
+                principal_data[user] = {
+                    "user_email": user,
+                    "cost_usd": 0.0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "thoughts_tokens": 0,
+                    "total_tokens": 0,
+                    "calls": 0,
+                    "models": set(),
+                }
+            pd_entry = principal_data[user]
+            pd_entry["cost_usd"] += cost
+            pd_entry["input_tokens"] += in_tok
+            pd_entry["output_tokens"] += out_tok
+            pd_entry["thoughts_tokens"] += th_tok
+            pd_entry["total_tokens"] += tot_tok
+            pd_entry["calls"] += calls
+            pd_entry["models"].add(model)
+
+            if model not in model_data:
+                model_data[model] = {
+                    "model_name": model,
+                    "cost_usd": 0.0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "thoughts_tokens": 0,
+                    "total_tokens": 0,
+                    "calls": 0,
+                }
+            md_entry = model_data[model]
+            md_entry["cost_usd"] += cost
+            md_entry["input_tokens"] += in_tok
+            md_entry["output_tokens"] += out_tok
+            md_entry["thoughts_tokens"] += th_tok
+            md_entry["total_tokens"] += tot_tok
+            md_entry["calls"] += calls
+
+        # Finalise per_principal — convert model sets to sorted lists.
+        per_principal = [
+            {
+                "user_email": pd["user_email"],
+                "cost_usd": round(pd["cost_usd"], 6),
+                "input_tokens": pd["input_tokens"],
+                "output_tokens": pd["output_tokens"],
+                "thoughts_tokens": pd["thoughts_tokens"],
+                "total_tokens": pd["total_tokens"],
+                "calls": pd["calls"],
+                "models": sorted(pd["models"]),
+            }
+            for pd in principal_data.values()
+        ]
+        per_principal.sort(key=lambda x: x["cost_usd"], reverse=True)
+
+        # Finalise per_model.
+        per_model = [
+            {
+                "model_name": md["model_name"],
+                "cost_usd": round(md["cost_usd"], 6),
+                "input_tokens": md["input_tokens"],
+                "output_tokens": md["output_tokens"],
+                "thoughts_tokens": md["thoughts_tokens"],
+                "total_tokens": md["total_tokens"],
+                "calls": md["calls"],
+            }
+            for md in model_data.values()
+        ]
+        per_model.sort(key=lambda x: x["cost_usd"], reverse=True)
+
+        # Budget snapshot — every rule including global_default.
+        budget_snapshot = [
+            {
+                "identity": identity,
+                "period": (
+                    rule.get("period", "month") if isinstance(rule, dict) else rule.period
+                ),
+                "type": (
+                    rule.get("type", "token") if isinstance(rule, dict) else rule.type
+                ),
+                "limit": (
+                    rule.get("limit") if isinstance(rule, dict) else rule.limit
+                ),
+            }
+            for identity, rule in budgets.items()
+        ]
+
+        # Pricing assumptions snapshot — rates as of generation time.
+        # NOTE: the portal does not yet store effective-dated rates; regenerating
+        # this statement after a pricing change will produce different cost figures.
+        pricing_assumptions = {
+            "rates_as_of_utc": generated_at_utc,
+            "note": (
+                "Rates applied as of statement generation time. "
+                "The portal does not yet store effective-dated rates, so "
+                "regenerating this statement after a pricing change will "
+                "produce different cost figures."
+            ),
+            "models": dict(bq_client.PRICING),
+        }
+
+        return {
+            "status": "success",
+            "data": {
+                "month": month,
+                "period_start": period_start,
+                "period_end_exclusive": period_end_exclusive,
+                "generated_at_utc": generated_at_utc,
+                "totals": {
+                    # Sum the ROUNDED per-principal figures rather than the raw
+                    # floats: on a statement the printed rows must add up to the
+                    # printed total, otherwise finance reconciliation fails over
+                    # a microcent.
+                    "cost_usd": round(sum(p["cost_usd"] for p in per_principal), 6),
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "thoughts_tokens": total_thoughts_tokens,
+                    "total_tokens": total_tokens,
+                    "calls": total_calls,
+                    "principals": len(principal_data),
+                },
+                "per_principal": per_principal,
+                "per_model": per_model,
+                "pricing_assumptions": pricing_assumptions,
+                "unpriced_models": sorted(unpriced_models),
+                "budget_snapshot": budget_snapshot,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error computing statement for month %s", month)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

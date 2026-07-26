@@ -4,6 +4,7 @@ import UsageCharts from './components/UsageCharts';
 import UserTable from './components/UserTable';
 import BudgetManager from './components/BudgetManager';
 import BudgetConsumption from './components/BudgetConsumption';
+import MonthlyStatement from './components/MonthlyStatement';
 import AlertCenter from './components/AlertCenter';
 import FinOpsAssistant from './components/FinOpsAssistant';
 import ModelLogging from './components/ModelLogging';
@@ -15,7 +16,7 @@ import { formatDateTime } from './utils/formatters';
 
 
 const VALID_TABS = [
-  'dashboard', 'budgets', 'budget-consumption', 'planner', 'alerts', 'logging', 'assistant',
+  'dashboard', 'budgets', 'budget-consumption', 'statements', 'planner', 'alerts', 'logging', 'assistant',
 ];
 
 // Dashboard time ranges → trailing-day window sent to /api/usage.
@@ -651,6 +652,12 @@ export default function App() {
             <span className="nav-item-icon">📊</span> Budget Consumption
           </button>
           <button
+            className={`nav-item ${activeTab === 'statements' ? 'active' : ''}`}
+            onClick={() => setActiveTab('statements')}
+          >
+            <span className="nav-item-icon">🧾</span> Monthly Statement
+          </button>
+          <button
             className={`nav-item ${activeTab === 'planner' ? 'active' : ''}`}
             onClick={() => setActiveTab('planner')}
           >
@@ -707,6 +714,7 @@ export default function App() {
               {activeTab === 'dashboard' && "Agent Platform Model Telemetry"}
               {activeTab === 'budgets' && "Corporate Budget Manager"}
               {activeTab === 'budget-consumption' && "Budget Consumption"}
+              {activeTab === 'statements' && "Monthly Statement"}
               {activeTab === 'alerts' && "Proactive Alerts Center"}
               {activeTab === 'logging' && "Vertex AI Model Logging"}
               {activeTab === 'assistant' && "Gemini FinOps Assistant"}
@@ -716,6 +724,7 @@ export default function App() {
               {activeTab === 'dashboard' && "Multi-tenant resource-usage logs and estimated token cost recovery metrics."}
               {activeTab === 'budgets' && "Establish cost centers, assign spending allowances, and manage proactive limits."}
               {activeTab === 'budget-consumption' && "Track live consumption against every configured budget constraint."}
+              {activeTab === 'statements' && "Calendar-month chargeback statement for finance and showback reporting."}
               {activeTab === 'alerts' && "Review real-time over-budget flags and critical threshold compliance logs."}
               {activeTab === 'logging' && "Configure bigquery request-response telemetry for Gemini models on Vertex AI."}
               {activeTab === 'assistant' && "Leverage Gemini generative intelligence to query and clean up token spends."}
@@ -1081,6 +1090,10 @@ export default function App() {
 
             {activeTab === 'budgets' && (
               <BudgetManager budgets={budgets} onSaveBudgets={handleSaveBudgets} />
+            )}
+
+            {activeTab === 'statements' && (
+              <MonthlyStatement />
             )}
 
             {activeTab === 'budget-consumption' && (

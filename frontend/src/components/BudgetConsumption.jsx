@@ -4,13 +4,17 @@ import { toCsv, downloadCsv, csvTimestamp } from '../utils/csv';
 
 // Sortable column definitions — key, label, default sort direction on first click.
 const COLUMNS = [
-  { key: 'principal',   label: 'Principal',     defaultDir: 'asc'  },
-  { key: 'budgetType',  label: 'Budget Type',   defaultDir: 'asc'  },
-  { key: 'period',      label: 'Period',        defaultDir: 'asc'  },
-  { key: 'limit',       label: 'Limit',         defaultDir: 'desc' },
-  { key: 'consumed',    label: 'Consumed',      defaultDir: 'desc' },
-  { key: 'percentage',  label: '% of Budget',   defaultDir: 'desc' },
-  { key: 'status',      label: 'Status',        defaultDir: 'desc' },
+  { key: 'principal',    label: 'Principal',       defaultDir: 'asc'  },
+  { key: 'budgetType',   label: 'Budget Type',     defaultDir: 'asc'  },
+  { key: 'period',       label: 'Period',          defaultDir: 'asc'  },
+  { key: 'limit',        label: 'Limit',           defaultDir: 'desc' },
+  { key: 'consumed',     label: 'Consumed',        defaultDir: 'desc' },
+  { key: 'percentage',   label: '% of Budget',     defaultDir: 'desc' },
+  // Status sits immediately after % so the at-a-glance signal stays visible
+  // without horizontal scrolling; the burn projections follow it.
+  { key: 'status',       label: 'Status',          defaultDir: 'desc' },
+  { key: 'daysToBreach', label: 'Days to Breach',  defaultDir: 'asc'  },
+  { key: 'dailyBurn',    label: 'Daily Burn',      defaultDir: 'desc' },
 ];
 
 const PERIOD_LABELS = { day: 'Daily', week: 'Weekly', month: 'Monthly', year: 'Yearly' };
@@ -85,6 +89,9 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
   const term = searchTerm.toLowerCase();
   const dir = sortDir === 'asc' ? 1 : -1;
 
+  // Extract burn window from the first entry that has one; fall back to 7.
+  const burnWindowDays = statusEntries.find(([, s]) => s.burn_window_days != null)?.[1].burn_window_days ?? 7;
+
   const rows = statusEntries
     .map(([identity, s], originalIndex) => ({
       identity,
@@ -96,6 +103,10 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
       consumed: s.consumed,
       hardLimitEnabled: s.hard_limit_enabled,
       isGlobalDefault: s.is_global_default,
+      dailyBurn: s.recent_daily_burn ?? null,
+      burnWindowDays: s.burn_window_days ?? null,
+      daysToBreach: s.days_to_breach !== undefined ? s.days_to_breach : null,
+      projectedPeriodPct: s.projected_period_pct ?? null,
       _idx: originalIndex, // stable sort tiebreaker
     }))
     .filter(r => r.identity.toLowerCase().includes(term));
@@ -123,6 +134,20 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
       case 'percentage':
         cmp = a.pct - b.pct;
         break;
+      case 'dailyBurn':
+        // Null burn (no recent data) sorts last in both directions.
+        cmp = (a.dailyBurn ?? -Infinity) - (b.dailyBurn ?? -Infinity);
+        break;
+      case 'daysToBreach': {
+        // Nulls always sort last regardless of direction.
+        const av = a.daysToBreach;
+        const bv = b.daysToBreach;
+        if (av === null && bv === null) { cmp = 0; break; }
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        cmp = av - bv;
+        break;
+      }
       case 'status':
         cmp = statusSeverity(a.pct, a.threshold) - statusSeverity(b.pct, b.threshold);
         break;
@@ -135,15 +160,19 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
   });
 
   const BC_CSV_COLUMNS = [
-    { key: 'principal',        header: 'principal' },
-    { key: 'budget_type',      header: 'budget_type' },
-    { key: 'period',           header: 'period' },
-    { key: 'limit',            header: 'limit' },
-    { key: 'consumed',         header: 'consumed' },
-    { key: 'percent_of_budget',header: 'percent_of_budget' },
-    { key: 'status',           header: 'status' },
-    { key: 'is_global_default',header: 'is_global_default' },
-    { key: 'hard_limit_enabled',header: 'hard_limit_enabled' },
+    { key: 'principal',           header: 'principal' },
+    { key: 'budget_type',         header: 'budget_type' },
+    { key: 'period',              header: 'period' },
+    { key: 'limit',               header: 'limit' },
+    { key: 'consumed',            header: 'consumed' },
+    { key: 'percent_of_budget',   header: 'percent_of_budget' },
+    { key: 'recent_daily_burn',   header: 'recent_daily_burn' },
+    { key: 'burn_window_days',    header: 'burn_window_days' },
+    { key: 'days_to_breach',      header: 'days_to_breach' },
+    { key: 'projected_period_pct',header: 'projected_period_pct' },
+    { key: 'status',              header: 'status' },
+    { key: 'is_global_default',   header: 'is_global_default' },
+    { key: 'hard_limit_enabled',  header: 'hard_limit_enabled' },
   ];
 
   const handleExport = () => {
@@ -152,15 +181,19 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
       const severity = statusSeverity(r.pct, r.threshold);
       const statusLabel = severity === 2 ? 'OVER LIMIT' : severity === 1 ? 'APPROACHING' : 'OK';
       return {
-        principal:         r.identity,
-        budget_type:       r.type,
-        period:            r.period,
-        limit:             r.limit,
-        consumed:          r.consumed,
-        percent_of_budget: r.pct,
-        status:            statusLabel,
-        is_global_default: r.isGlobalDefault,
-        hard_limit_enabled: r.hardLimitEnabled,
+        principal:            r.identity,
+        budget_type:          r.type,
+        period:               r.period,
+        limit:                r.limit,
+        consumed:             r.consumed,
+        percent_of_budget:    r.pct,
+        recent_daily_burn:    r.dailyBurn,
+        burn_window_days:     r.burnWindowDays,
+        days_to_breach:       r.daysToBreach,
+        projected_period_pct: r.projectedPeriodPct,
+        status:               statusLabel,
+        is_global_default:    r.isGlobalDefault,
+        hard_limit_enabled:   r.hardLimitEnabled,
       };
     });
     downloadCsv(`budget-consumption-${csvTimestamp()}.csv`, toCsv(BC_CSV_COLUMNS, csvRows));
@@ -178,6 +211,9 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
         </div>
         <p className="bc-period-note">
           Each row is scoped to that principal's own budget period — not a fixed window.
+        </p>
+        <p className="bc-period-note" style={{ marginTop: '4px', fontStyle: 'italic' }}>
+          Burn is the trailing {burnWindowDays}-day average; days-to-breach assumes it continues.
         </p>
       </div>
 
@@ -328,9 +364,27 @@ export default function BudgetConsumption({ budgetStatus, budgets: _budgets, onN
                       </div>
                     </td>
 
-                    {/* Status pill */}
+                    {/* Status pill — cell order MUST match the COLUMNS header
+                        order above, where Status was promoted ahead of the
+                        burn projections so it stays visible without scrolling. */}
                     <td>
                       <span className={statusCls}>{statusLabel}</span>
+                    </td>
+
+                    {/* Days to Breach */}
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                      {r.daysToBreach === null
+                        ? '—'
+                        : r.daysToBreach === 0 && r.pct >= 100
+                        ? <span style={{ color: 'var(--status-crit)' }}>Over limit</span>
+                        : r.daysToBreach.toFixed(1)}
+                    </td>
+
+                    {/* Daily Burn */}
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                      {r.dailyBurn != null
+                        ? `${r.type === 'money' ? formatCurrency(r.dailyBurn) : formatTokens(r.dailyBurn)}/day`
+                        : '—'}
                     </td>
                   </tr>
                 );
