@@ -54,6 +54,12 @@ export default function App() {
   // Dismissal key for the anomaly banner: generated_at_utc + '|' + ratio.
   // A new spike with a different ratio or generation timestamp re-surfaces the banner.
   const [dismissedAnomalyKey, setDismissedAnomalyKey] = useState(null);
+  // Config-health findings are long-lived (unlike a cost spike), so the
+  // dismissal persists across reloads — keyed by the issue SET so genuinely
+  // new findings re-surface rather than hiding behind an old dismissal.
+  const [dismissedConfigSig, setDismissedConfigSig] = useState(
+    () => localStorage.getItem('portal_dismissed_config_sig') || null
+  );
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authTokenInput, setAuthTokenInput] = useState('');
 
@@ -522,6 +528,26 @@ export default function App() {
       }`
     : null;
   const showAnomalyBanner = anomalyKey !== null && dismissedAnomalyKey !== anomalyKey;
+
+  // Signature over every finding: any added/removed item re-expands the panel.
+  const configHealthSig = configHealth
+    ? [
+        ...(configHealth.unlogged_used_models || []),
+        ...(configHealth.used_unpriced_models || []),
+        ...(configHealth.unused_budgets || []).map(b => b.identity),
+        ...(configHealth.logged_unused_models || []),
+      ].sort().join(',')
+    : null;
+  const configHealthDismissed =
+    configHealthSig !== null && dismissedConfigSig === configHealthSig;
+  const handleDismissConfigHealth = () => {
+    setDismissedConfigSig(configHealthSig);
+    try { localStorage.setItem('portal_dismissed_config_sig', configHealthSig); } catch { /* storage unavailable */ }
+  };
+  const handleRestoreConfigHealth = () => {
+    setDismissedConfigSig(null);
+    try { localStorage.removeItem('portal_dismissed_config_sig'); } catch { /* storage unavailable */ }
+  };
 
   const themeOptions = [
     { value: 'light',  label: '☀ Light' },
@@ -1043,7 +1069,13 @@ export default function App() {
                   chartTruncated={chartTruncated}
                 />
                 <UserTable logs={dashboardRows} budgets={budgets} budgetStatus={budgetStatus} rangeLabel={rangeLabel} />
-                <ConfigHealth health={configHealth} onNavigate={setActiveTab} />
+                <ConfigHealth
+                  health={configHealth}
+                  onNavigate={setActiveTab}
+                  dismissed={configHealthDismissed}
+                  onDismiss={handleDismissConfigHealth}
+                  onRestore={handleRestoreConfigHealth}
+                />
               </div>
             )}
 

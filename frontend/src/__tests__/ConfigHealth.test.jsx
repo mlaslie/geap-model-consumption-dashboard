@@ -138,3 +138,67 @@ describe('ConfigHealth — truncation', () => {
     expect(screen.queryByText(/more/)).not.toBeInTheDocument();
   });
 });
+
+describe('ConfigHealth dismissal', () => {
+  const withIssues = {
+    unused_budgets: [],
+    logged_unused_models: ['gemini-a', 'gemini-b'],
+    used_unpriced_models: [],
+    unlogged_used_models: [],
+    usage_window_days: 30,
+  };
+
+  it('shows a dismiss control when there are findings', () => {
+    render(<ConfigHealth health={withIssues} onNavigate={() => {}} onDismiss={() => {}} />);
+    expect(
+      screen.getByRole('button', { name: /dismiss configuration health/i })
+    ).toBeInTheDocument();
+  });
+
+  it('calls onDismiss when the control is clicked', async () => {
+    const onDismiss = vi.fn();
+    render(<ConfigHealth health={withIssues} onNavigate={() => {}} onDismiss={onDismiss} />);
+    await userEvent.click(screen.getByRole('button', { name: /dismiss configuration health/i }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('collapses to a summary with a Show control instead of disappearing', () => {
+    render(
+      <ConfigHealth health={withIssues} onNavigate={() => {}} dismissed onRestore={() => {}} />
+    );
+    // Findings are hidden...
+    expect(screen.queryByText(/safe to disable/i)).not.toBeInTheDocument();
+    // ...but the panel remains discoverable with a count and a way back.
+    expect(screen.getByText(/2 items hidden/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show/i })).toBeInTheDocument();
+  });
+
+  it('calls onRestore from the collapsed state', async () => {
+    const onRestore = vi.fn();
+    render(
+      <ConfigHealth health={withIssues} onNavigate={() => {}} dismissed onRestore={onRestore} />
+    );
+    await userEvent.click(screen.getByRole('button', { name: /show/i }));
+    expect(onRestore).toHaveBeenCalledTimes(1);
+  });
+
+  it('never shows a dismiss control in the healthy state', () => {
+    const healthy = {
+      unused_budgets: [], logged_unused_models: [],
+      used_unpriced_models: [], unlogged_used_models: [], usage_window_days: 30,
+    };
+    render(<ConfigHealth health={healthy} onNavigate={() => {}} onDismiss={() => {}} />);
+    expect(
+      screen.queryByRole('button', { name: /dismiss configuration health/i })
+    ).not.toBeInTheDocument();
+  });
+
+  it('dismissed=true with no findings still renders the healthy line (nothing to hide)', () => {
+    const healthy = {
+      unused_budgets: [], logged_unused_models: [],
+      used_unpriced_models: [], unlogged_used_models: [], usage_window_days: 30,
+    };
+    render(<ConfigHealth health={healthy} onNavigate={() => {}} dismissed onRestore={() => {}} />);
+    expect(screen.getByText(/configuration healthy/i)).toBeInTheDocument();
+  });
+});

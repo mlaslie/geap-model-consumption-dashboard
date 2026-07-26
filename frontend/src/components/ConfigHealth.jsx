@@ -2,7 +2,7 @@ import React from 'react';
 
 const MAX_VISIBLE = 6;
 
-export default function ConfigHealth({ health, onNavigate }) {
+export default function ConfigHealth({ health, onNavigate, dismissed = false, onDismiss, onRestore }) {
   if (!health) return null;
 
   const {
@@ -67,9 +67,65 @@ export default function ConfigHealth({ health, onNavigate }) {
     });
   }
 
+  // Collapsed (dismissed) state: never hide the panel outright — that would
+  // make the issues undiscoverable. Show a one-line summary with a way back.
+  // App re-expands automatically when the issue SET changes (new problems must
+  // not stay hidden behind an old dismissal).
+  if (dismissed && !allEmpty) {
+    const issueCount = rows.reduce((n, r) => n + r.items.length, 0);
+    return (
+      <div
+        className="card-panel"
+        style={{
+          minHeight: 'auto',
+          marginTop: '24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px',
+          padding: '12px 20px',
+        }}
+      >
+        <span style={{ fontSize: '12.5px', color: 'var(--ink-3)' }}>
+          Configuration Health — {issueCount} item{issueCount === 1 ? '' : 's'} hidden
+        </span>
+        <button
+          type="button"
+          className="btn-secondary"
+          style={{ fontSize: '12px', padding: '4px 12px' }}
+          onClick={onRestore}
+        >
+          Show
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="card-panel" style={{ minHeight: 'auto', marginTop: '24px' }}>
-      <div className="panel-title">Configuration Health</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+        <div className="panel-title" style={{ marginBottom: 0 }}>Configuration Health</div>
+        {!allEmpty && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss configuration health details"
+            title="Hide until these findings change"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--ink-3)',
+              cursor: 'pointer',
+              fontSize: '15px',
+              lineHeight: 1,
+              padding: '2px 6px',
+              flexShrink: 0,
+            }}
+          >
+            ✕
+          </button>
+        )}
+      </div>
 
       {allEmpty ? (
         <div style={{
