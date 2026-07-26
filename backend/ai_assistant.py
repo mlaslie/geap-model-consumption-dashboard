@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 from backend.config import settings
 from backend.bq_client import get_user_model_totals_cached
@@ -23,6 +24,29 @@ class AssistantUnavailableError(Exception):
     pass
 
 
+# Time windows always injected into the assistant's context, so questions like
+# "who used the most tokens in the last 24 hours" resolve against real
+# window-scoped data instead of the model guessing from a single 30-day blob.
+STANDARD_WINDOWS: Dict[str, int] = {
+    "last_24_hours": 1,
+    "last_7_days": 7,
+    "last_30_days": 30,
+}
+
+
+def _aggregate_users(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Sums per-(user, model, tier, region) rows into per-user totals."""
+    users: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        u = row["user_email"]
+        if u not in users:
+            users[u] = {"tokens": 0, "cost": 0.0, "calls": 0}
+        users[u]["tokens"] += row["total_tokens"]
+        users[u]["cost"] += row["estimated_cost_usd"]
+        users[u]["calls"] += row["call_count"]
+    return users
+
+
 def query_finops_assistant(messages: List[Dict[str, str]]) -> str:
     """
     Answers user questions about FinOps, budgets, and token usage.
@@ -37,10 +61,20 @@ def query_finops_assistant(messages: List[Dict[str, str]]) -> str:
             "google-genai SDK not installed or BIGQUERY_PROJECT_ID unset"
         )
 
+    # Memoize per-days fetches so a window shared by STANDARD_WINDOWS and a
+    # budget period is only queried once per turn (the client also has a 30s
+    # TTL cache behind this).
+    _rows_by_days: Dict[int, List[Dict[str, Any]]] = {}
+
+    def rows_for(days: int) -> List[Dict[str, Any]]:
+        if days not in _rows_by_days:
+            _rows_by_days[days] = get_user_model_totals_cached(days=days)
+        return _rows_by_days[days]
+
     # 1. Fetch 30-day SQL-aggregated totals for the headline summary and
     #    per-model breakdown.  Rows are per (user, model, tier, region);
     #    the loops below SUM across them, so finer grain is transparent.
-    rows_30 = get_user_model_totals_cached(days=30)
+    rows_30 = rows_for(30)
     budgets = load_budgets()
 
     # Build 30-day user and model summaries
@@ -85,28 +119,47 @@ def query_finops_assistant(messages: List[Dict[str, str]]) -> str:
 
     period_user_totals: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for period in distinct_periods:
-        days = _PERIOD_DAYS[period]
-        rows = get_user_model_totals_cached(days=days)
-        pu: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            u = row["user_email"]
-            if u not in pu:
-                pu[u] = {"tokens": 0, "cost": 0.0, "calls": 0}
-            pu[u]["tokens"] += row["total_tokens"]
-            pu[u]["cost"] += row["estimated_cost_usd"]
-            pu[u]["calls"] += row["call_count"]
-        period_user_totals[period] = pu
+        period_user_totals[period] = _aggregate_users(rows_for(_PERIOD_DAYS[period]))
+
+    # 3. Window-scoped usage so relative-time questions ("last 24 hours",
+    #    "this week") are answered from real window data. Windows with no
+    #    activity are still emitted with explicit zeros so the model states
+    #    "no usage" instead of borrowing another window's numbers.
+    usage_by_window: Dict[str, Any] = {}
+    for label, days in STANDARD_WINDOWS.items():
+        per_user = _aggregate_users(rows_for(days))
+        usage_by_window[label] = {
+            "window_days": days,
+            "total_tokens": sum(u["tokens"] for u in per_user.values()),
+            "total_cost_usd": round(sum(u["cost"] for u in per_user.values()), 4),
+            "total_calls": sum(u["calls"] for u in per_user.values()),
+            "active_users": len(per_user),
+            "per_user": {
+                u: {
+                    "tokens": m["tokens"],
+                    "cost_usd": round(m["cost"], 4),
+                    "calls": m["calls"],
+                }
+                for u, m in sorted(
+                    per_user.items(), key=lambda kv: kv[1]["tokens"], reverse=True
+                )
+            },
+        }
+
+    now_utc = datetime.now(timezone.utc)
 
     # Format summarizations for the context
     context_data: Dict[str, Any] = {
-        "summary": {
+        "report_generated_at_utc": now_utc.isoformat(timespec="seconds"),
+        "usage_by_window": usage_by_window,
+        "summary_last_30_days": {
             "total_spend_usd": round(total_spend, 4),
             "total_tokens_consumed": total_tokens,
             "total_calls": total_calls,
             "unique_users_tracked": len(user_totals_30),
         },
         "per_user_consumption_and_budgets": {},
-        "per_model_consumption": model_totals,
+        "per_model_consumption_last_30_days": model_totals,
     }
 
     # Match consumption with actual set budgets; guard against missing global_default
@@ -163,13 +216,17 @@ def query_finops_assistant(messages: List[Dict[str, str]]) -> str:
         )
         top_models = dict(
             sorted(
-                context_data["per_model_consumption"].items(),
+                context_data["per_model_consumption_last_30_days"].items(),
                 key=lambda kv: kv[1].get("cost", 0),
                 reverse=True,
             )[:50]
         )
         context_data["per_user_consumption_and_budgets"] = top_users
-        context_data["per_model_consumption"] = top_models
+        context_data["per_model_consumption_last_30_days"] = top_models
+        # Window per_user maps can also be large — keep the top 50 by tokens.
+        for label, w in context_data["usage_by_window"].items():
+            if len(w.get("per_user", {})) > 50:
+                w["per_user"] = dict(list(w["per_user"].items())[:50])  # already token-sorted
         context_data["_truncated"] = True
         context_data["_truncation_note"] = (
             "Breakdowns truncated to top 50 entries by cost due to context size limits."
@@ -178,14 +235,41 @@ def query_finops_assistant(messages: List[Dict[str, str]]) -> str:
     # Injected System Prompt guiding the LLM
     system_prompt = f"""You are the "Gemini FinOps Assistant" — an elite Google Cloud FinOps auditor specializing in tracking user-level token usage and budget configurations for direct Vertex AI SDK calls.
 
+The current date and time is {now_utc.strftime('%Y-%m-%d %H:%M')} UTC. Resolve every
+relative time reference ("today", "last 24 hours", "this week", "recently") against that clock.
+
 Below is the dynamic, real-time consumption and budget telemetry of the enterprise:
 {json.dumps(context_data, indent=2)}
 
+TIME WINDOWS — read carefully:
+- `usage_by_window` holds SEPARATE totals for each available window: {", ".join(STANDARD_WINDOWS)}.
+  Answer a time-scoped question ONLY from the matching window.
+- NEVER substitute one window's numbers for another. If a window's totals are zero,
+  say plainly that there was no recorded usage in that window — do not fall back to a
+  wider window's figures and do not imply the usage happened recently.
+- If the question targets a window that is not available (e.g. "the last hour",
+  "yesterday only", "the last 90 days"), say so and answer from the nearest available
+  window, stating explicitly which window your numbers cover.
+- Windows are computed from UTC day buckets, so a window may include part of the
+  preceding UTC day; describe short windows as approximate.
+- Telemetry lags reality: token rows land ~1-2 minutes after a call and user attribution
+  can take 5-15 minutes. Very recent calls may not appear yet — mention this when a
+  short window looks empty.
+- `per_user_consumption_and_budgets` is scoped to each user's own BUDGET PERIOD (not to
+  the windows above); use it for budget/percentage questions only.
+- `per_model_consumption_last_30_days` and `summary_last_30_days` are 30-day figures;
+  always label them as such.
+
 Guidelines:
 1. Provide extremely concise, professional, and clear answers grounded directly in the provided telemetry.
-2. Avoid generic answers. Quote precise numbers, dollars, token counts, and emails of users when asked.
+2. Avoid generic answers. Quote precise numbers, dollars, token counts, and emails of users when asked — and state the time window each figure covers.
 3. If a user is near or exceeding their budget limit, call them out as an alert or risk and suggest optimizations (e.g. suggest switching expensive pro-class workloads to a flash-class model).
 4. If asked to write a budget rule or adjust settings, explain that they can easily do so in the "Budget Manager" tab.
+5. `unattributed@unknown` is not a real principal — it is usage the pipeline could not
+   match to a caller identity (calls made before audit-log export was configured, or
+   rows missing latency metadata). Explain that rather than treating it as a person.
+6. Models priced at $0 with no rate configured are UNPRICED, not free; their tokens are
+   real but cost cannot be computed until rates are added in the "Pricing & Planner" tab.
 """
 
     try:
