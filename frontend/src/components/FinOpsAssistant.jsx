@@ -10,6 +10,43 @@ export default function FinOpsAssistant() {
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // Index of the message showing a "copied" tick (null = none)
+  const [copiedIdx, setCopiedIdx] = useState(null);
+  const copyTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+  }, []);
+
+  // Copies the RAW markdown of a message (what the user sees as text), with a
+  // textarea fallback for browsers/contexts where the async clipboard API is
+  // unavailable.
+  const handleCopyMessage = async (idx, text) => {
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch {
+        ok = false;
+      }
+    }
+    if (ok) {
+      setCopiedIdx(idx);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopiedIdx(null), 2000);
+    }
+  };
   const scrollRef = useRef(null);
 
   // Automatically scroll chat history to bottom on new messages
@@ -110,8 +147,19 @@ export default function FinOpsAssistant() {
       {/* Chat History */}
       <div className="assistant-chat-history" ref={scrollRef}>
         {messages.map((msg, idx) => (
-          <div key={idx} className={`chat-bubble ${msg.role === 'user' ? 'user' : 'assistant'}`}>
-            {formatMarkdown(msg.content)}
+          <div key={idx} className={`chat-bubble-row ${msg.role === 'user' ? 'user' : 'assistant'}`}>
+            <div className={`chat-bubble ${msg.role === 'user' ? 'user' : 'assistant'}`}>
+              {formatMarkdown(msg.content)}
+            </div>
+            <button
+              type="button"
+              className="chat-copy-btn"
+              onClick={() => handleCopyMessage(idx, msg.content)}
+              title="Copy this message"
+              aria-label={copiedIdx === idx ? 'Copied' : 'Copy message'}
+            >
+              {copiedIdx === idx ? '✓' : '⧉'}
+            </button>
           </div>
         ))}
         {isLoading && (

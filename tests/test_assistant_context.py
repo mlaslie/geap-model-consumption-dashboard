@@ -212,5 +212,31 @@ def test_normal_reply_has_no_truncation_notice(monkeypatch, captured_prompt):
     assert "cut off" not in out
 
 
-def test_output_cap_is_generous_enough_for_multipart_answers():
-    assert ai.ASSISTANT_MAX_OUTPUT_TOKENS >= 2048
+def test_no_output_token_cap_is_sent(monkeypatch):
+    """No max_output_tokens: an explicit cap is what truncated answers before."""
+    seen = {}
+
+    class _FakeModels:
+        def generate_content(self, model, contents, config):
+            seen["config"] = config
+
+            class _R:
+                text = "ok"
+            return _R()
+
+    monkeypatch.setattr(ai, "_SDK_AVAILABLE", True)
+    monkeypatch.setattr(ai.settings, "BIGQUERY_PROJECT_ID", "test-project")
+    monkeypatch.setattr(ai, "genai", type("g", (), {
+        "Client": lambda **kw: type("c", (), {"models": _FakeModels()})()
+    }))
+    monkeypatch.setattr(ai, "types", type("t", (), {
+        "Content": lambda role, parts: {"role": role, "parts": parts},
+        "Part": type("P", (), {"from_text": staticmethod(lambda text: text)}),
+        "GenerateContentConfig": lambda **kw: type("C", (), kw)(),
+    }))
+    monkeypatch.setattr(ai, "get_user_model_totals_cached", lambda days: [])
+    monkeypatch.setattr(ai, "load_budgets", lambda: {})
+
+    ai.query_finops_assistant([{"role": "user", "content": "hi"}])
+    assert not hasattr(seen["config"], "max_output_tokens")
+    assert not hasattr(ai, "ASSISTANT_MAX_OUTPUT_TOKENS")

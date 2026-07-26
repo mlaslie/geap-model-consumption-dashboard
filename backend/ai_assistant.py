@@ -33,11 +33,6 @@ STANDARD_WINDOWS: Dict[str, int] = {
     "last_30_days": 30,
 }
 
-# Output ceiling for one assistant reply. Multi-part questions ("which models
-# AND which regions, in the last 24 hours") need room for several sections;
-# the previous 800-token cap cut answers off mid-sentence.
-ASSISTANT_MAX_OUTPUT_TOKENS = 4096
-
 
 def _aggregate_by(rows: List[Dict[str, Any]], key: str) -> Dict[str, Dict[str, Any]]:
     """Sums per-(user, model, tier, region) rows by any single dimension."""
@@ -305,15 +300,13 @@ Guidelines:
                 parts=[types.Part.from_text(text=msg["content"])]
             ))
 
-        # Request generation.
-        # max_output_tokens was 800 (~600 words), which silently truncated
-        # multi-part answers mid-sentence (e.g. "models AND regions used").
-        # Raised well clear of a full breakdown; cost impact is negligible
-        # because output is only billed for what is actually generated.
+        # No max_output_tokens: an explicit cap previously truncated multi-part
+        # answers mid-sentence, and output is billed only for what is actually
+        # generated, so limiting it buys nothing. The model's own ceiling
+        # applies; the MAX_TOKENS check below still flags that case.
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0.2,
-            max_output_tokens=ASSISTANT_MAX_OUTPUT_TOKENS
         )
 
         response = client.models.generate_content(

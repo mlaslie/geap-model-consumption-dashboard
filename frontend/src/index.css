@@ -1466,3 +1466,68 @@ select.form-control {
   padding-right: 6px;
   scrollbar-width: thin;
 }
+
+/* ==========================================================================
+   Chat message rows with per-message copy button
+   ========================================================================== */
+.chat-bubble-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.chat-bubble-row.user {
+  flex-direction: row-reverse;
+  align-self: flex-end;
+}
+
+.chat-bubble-row.assistant {
+  align-self: flex-start;
+}
+
+/* The bubble keeps its own styling; the row just positions it + the button */
+.chat-bubble-row .chat-bubble {
+  align-self: auto;
+}
+
+.chat-copy-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 6px;
+  margin-top: 4px;
+  flex-shrink: 0;
+  /* Always present (discoverable) but recessive until hovered */
+  opacity: 0.45;
+  transition: opacity 0.15s, color 0.15s, background-color 0.15s;
+}
+
+.chat-bubble-row:hover .chat-copy-btn,
+.chat-copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.chat-copy-btn:hover {
+  color: var(--ink);
+  background-color: var(--surface-2);
+}
+
+.chat-copy-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Keep the tick visible while it is showing, even without hover */
+.chat-copy-btn[aria-label="Copied"] {
+  opacity: 1;
+  color: var(--status-good);
+}
+
+@media (hover: none) {
+  .chat-copy-btn { opacity: 0.7; }
+}
