@@ -1,5 +1,8 @@
 # Secrets & environment
 .env
+# setup_gcp.sh writes timestamped backups when it rewrites .env; these carry a
+# live PORTAL_AUTH_TOKEN and do NOT match the bare ".env" rule above.
+.env.backup.*
 iam_policy.json
 
 # Runtime state (local fallbacks written by the app)

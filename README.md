@@ -4,6 +4,24 @@ A Vertex AI per-user token consumption and FinOps portal built on GCP-native tel
 
 ---
 
+> ## ⚠️ Telemetry starts when setup finishes — there is no historical data
+>
+> **This portal reports only on Vertex AI calls made *after* the setup below is complete. It cannot show you what you spent last week, last month, or last year.**
+>
+> Both telemetry streams begin at zero when you configure them:
+>
+> - **Cloud Logging sinks are forward-only.** A sink exports log entries written *after* it exists. GCP never backfills a sink, so audit entries — and therefore user identities — for earlier calls are permanently unavailable.
+> - **Payload logging is opt-in per model.** `request_response_logging` is created by Vertex AI on the first call made *after* you enable logging for that model. Calls before that were never recorded.
+>
+> Practical consequences:
+>
+> - An empty dashboard immediately after setup is **correct**, not a bug. Make a call and wait a few minutes.
+> - The first call or two on a brand-new project often show as `unattributed@unknown`. GCP's audit configuration takes several minutes to propagate, and anything logged before it does has no identity attached. This resolves itself and does not repeat.
+> - Turn this on **before** the period you intend to bill for. Enabling it at month end gives you nothing for that month.
+> - If you need historical spend, use Cloud Billing exports. This tool is a per-user attribution layer going forward, not a retrospective one.
+
+---
+
 ## Features
 
 Features are organized by the six UI tabs:
@@ -54,14 +72,72 @@ For a detailed description of the BigQuery correlation algorithm, GCS fail-close
 
 ## Quick Start
 
-See [setup_new_environment_guide.md](setup_new_environment_guide.md) for the full walkthrough including GCP API enablement, audit-log configuration, IAM setup, and Cloud Run deployment. For an interactive experience with your values substituted into every command, open [setup-guide.html](setup-guide.html) in your browser after cloning.
+There are two ways to set up a new environment. **Option 1 is recommended** — it runs the same steps as the manual path, but converges automatically and cannot silently skip the grant that most setups get wrong.
 
 ### Prerequisites
 
 - Python 3.11+
 - Node.js 18+ and npm
 - Google Cloud SDK (`gcloud`) authenticated with Application Default Credentials
-- A GCP project with billing enabled, BigQuery and Vertex AI enabled
+- A GCP project with billing enabled, and Owner (or equivalent) on it
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+---
+
+## Option 1 — Guided setup script (recommended)
+
+```bash
+./setup_gcp.sh
+```
+
+A wizard: it asks every question up front (project, dataset, bucket, model, auth token), shows a summary, waits for one confirmation, then provisions everything unattended.
+
+It performs the whole of Option 2 in one pass:
+
+1. Verifies billing, `gcloud`/`bq`/Python, and Application Default Credentials
+2. Enables the required APIs
+3. Enables Vertex AI Data Access audit logs — **merging** into the existing policy, and skipping the write entirely when nothing needs to change
+4. Creates the BigQuery dataset
+5. Creates the Cloud Logging sink with the validated filter and partitioned tables
+6. Grants the sink's writer identity WRITER on the dataset — *sequenced automatically from the sink's own identity, so it cannot be missed*
+7. Creates the GCS bucket
+8. Writes `.env` (mode 600, generating a strong `PORTAL_AUTH_TOKEN`; any existing file is backed up)
+9. Builds the frontend, enables payload logging, makes a test call, creates the view
+10. Waits for the first audit export, then verifies the pipeline end to end
+
+Every step is **idempotent** — re-running reports `skip` for anything already correct, so it is safe to run against an existing environment to repair drift.
+
+Preview without changing anything:
+
+```bash
+./setup_gcp.sh --dry-run
+```
+
+### Verifying at any time
+
+```bash
+python verify_telemetry.py          # makes a call, follows it to an attributed row
+python verify_telemetry.py --fix    # also upgrades a stale fallback view
+python verify_telemetry.py --skip-call   # check existing data only
+```
+
+It reports each link in the chain separately — payload stream, audit export, attribution, and the `input + output == total_tokens` reconciliation — so a failure points at the specific stage rather than an empty dashboard. Exit code 0 means fully attributed, so it works in CI.
+
+> Step 10 waits for the Cloud Logging sink's first export. On a brand-new project this takes **15–20 minutes**, because the audit configuration must propagate before any call is logged at all. `Ctrl-C` during that wait is safe — setup is already complete, and the script prints the command to resume verification later.
+
+---
+
+## Option 2 — Manual setup
+
+Use this if you want to run each step yourself, or your organisation requires reviewing each command. See [setup_new_environment_guide.md](setup_new_environment_guide.md) for the full walkthrough including IAM detail and Cloud Run deployment. For an interactive version with your values substituted into every command, open [setup-guide.html](setup-guide.html) in your browser after cloning.
+
+The guide covers GCP-side provisioning (APIs, audit logs, dataset, sink, the dataset WRITER grant, and the bucket). Once that is done:
 
 ### 1. Configure environment
 
@@ -113,7 +189,9 @@ python setup_bigquery_view.py
 python setup_bigquery_view.py   # upgrades to the full attribution view
 ```
 
-### 6. Docker / Cloud Run
+---
+
+## Docker / Cloud Run
 
 ```bash
 # Build the image first, then deploy
@@ -125,7 +203,7 @@ gcloud run deploy vertex-consumption-portal \
 # a --no-allow-unauthenticated service.
 ```
 
-### 7. Run tests
+## Run tests
 
 ```bash
 python -m pytest tests/ -q
@@ -369,6 +447,8 @@ All `/api/*` endpoints require `Authorization: Bearer <PORTAL_AUTH_TOKEN>`. `/he
 │   ├── vite.config.js          Dev proxy → 127.0.0.1:8000; build → ../backend/static
 │   └── package.json
 ├── tests/                      pytest suite (16 test modules)
+├── setup_gcp.sh                Guided, idempotent GCP provisioning (Option 1)
+├── verify_telemetry.py         End-to-end telemetry + attribution verification
 ├── update.sh                   One-command update: pull → deps → build → BQ migration
 ├── setup_bigquery_view.py      Creates the user_token_chargebacks BQ view
 ├── enable_audit_logs.py        Merges Vertex AI Data Access audit config into IAM policy
@@ -379,7 +459,7 @@ All `/api/*` endpoints require `Authorization: Bearer <PORTAL_AUTH_TOKEN>`. `/he
 ├── logging_config.json         Local fallback logging-config storage
 ├── estimates.json              Local fallback estimates storage
 ├── comprehensive_design_document.md  Architecture, BQ schema, lessons learned
-├── setup_new_environment_guide.md    Full GCP setup walkthrough
+└── setup_new_environment_guide.md    Full GCP setup walkthrough
 ```
 
 ---

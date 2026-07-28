@@ -85,10 +85,8 @@ The operator running this guide needs the following roles (or `roles/owner`) on 
 
 ```bash
 git clone https://github.com/mlaslie/geap-model-consumption-dashboard.git
-cd vertex-ai-token-consumption
+cd geap-model-consumption-dashboard
 ```
-
-Replace `<your-org>` with the actual GitHub organization or username where the repo lives.
 
 ---
 
